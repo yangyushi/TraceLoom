@@ -1,0 +1,5 @@
+.*
+!.gitignore
+src-tauri/target
+dist
+node_modules

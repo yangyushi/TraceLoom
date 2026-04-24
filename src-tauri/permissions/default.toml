@@ -1,0 +1,9 @@
+[[permission]]
+identifier = "allow-load-trajectory"
+description = "Allows the load_trajectory command to parse JSONL files."
+commands.allow = ["load_trajectory"]
+
+[[permission]]
+identifier = "allow-list-jsonl-files"
+description = "Allows the list_jsonl_files command to scan directories."
+commands.allow = ["list_jsonl_files"]

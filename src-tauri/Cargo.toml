@@ -1,0 +1,32 @@
+[package]
+name = "llm-tracer"
+version = "0.1.0"
+description = "A cross-platform desktop app to visualise LLM agent message histories as DAGs"
+edition = "2021"
+rust-version = "1.80"
+
+[lib]
+name = "llm_tracer_lib"
+path = "src/lib.rs"
+
+[[bin]]
+name = "llm-tracer"
+path = "src/main.rs"
+
+[dependencies]
+tauri = { version = "2.5", features = [] }
+tauri-plugin-dialog = "2"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+thiserror = "2.0"
+chrono = { version = "0.4", features = ["serde"] }
+
+[dev-dependencies]
+tempfile = "3.0"
+
+[build-dependencies]
+tauri-build = { version = "2.5", features = [] }
+
+[profile.release]
+opt-level = 3
+lto = true
