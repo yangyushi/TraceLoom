@@ -252,6 +252,7 @@
     flex-direction: column;
     overflow: hidden;
     flex-shrink: 0;
+    min-height: 0;
   }
 
   .file-list-header {
@@ -274,6 +275,7 @@
     display: flex;
     flex-direction: column;
     padding: 4px;
+    min-height: 0;
   }
 
   .file-items::-webkit-scrollbar {
@@ -306,6 +308,7 @@
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
+    flex-shrink: 0;
   }
 
   .file-item:hover {

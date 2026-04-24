@@ -9,7 +9,7 @@ all:
 
 # Run the app in development mode (hot-reload frontend + Rust)
 dev:
-	npx tauri dev
+	npm run tauri dev
 
 # Build debug binary (faster compilation, no bundling)
 debug:
