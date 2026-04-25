@@ -62,6 +62,12 @@ pub fn parse(contents: &str) -> Result<Trajectory, ParseError> {
         trajectory.session_id = sid;
     }
 
+    // Codex messages have no explicit parent_id; chain them by temporal/file order.
+    for i in 1..trajectory.messages.len() {
+        let prev_id = trajectory.messages[i - 1].id.clone();
+        trajectory.messages[i].parent_id = Some(prev_id);
+    }
+
     Ok(trajectory)
 }
 
@@ -284,5 +290,17 @@ mod tests {
         let tool_result = msg.blocks.iter().find(|b| b.kind == "tool_result").expect("tool_result block");
         assert!(tool_result.tool_call_id.is_none() || tool_result.tool_call_id.as_ref().unwrap().is_empty(),
             "must not set tool_call_id when call_id is missing");
+    }
+
+    #[test]
+    fn test_codex_temporal_parent_chain() {
+        let jsonl = r#"{"type":"response_item","timestamp":"2026-01-01T00:00:00Z","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"hello"}]}}
+{"type":"response_item","timestamp":"2026-01-01T00:00:01Z","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"hi"}]}}
+{"type":"response_item","timestamp":"2026-01-01T00:00:02Z","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"bye"}]}}"#;
+        let traj = parse(&jsonl).unwrap();
+        assert_eq!(traj.messages.len(), 3, "expected 3 messages");
+        assert!(traj.messages[0].parent_id.is_none(), "first message should have no parent");
+        assert_eq!(traj.messages[1].parent_id, Some(traj.messages[0].id.clone()), "msg-2 parent should be msg-1");
+        assert_eq!(traj.messages[2].parent_id, Some(traj.messages[1].id.clone()), "msg-3 parent should be msg-2");
     }
 }

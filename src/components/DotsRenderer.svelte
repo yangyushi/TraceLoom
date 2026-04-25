@@ -18,7 +18,6 @@
   const MSG_X = 0;
   const BLOCK_X_OFFSET = 140;
   const BLOCK_H_SPACING = 45;
-  const BLOCK_SPACING = 50;
   const MIN_MSG_SPACING = 100;
   const PADDING = 40;
 
@@ -65,7 +64,11 @@
     return result;
   }
 
-  function buildElements(): cytoscape.ElementDefinition[] {
+  function buildElements(): {
+    elements: cytoscape.ElementDefinition[];
+    msgOrder: Message[];
+    msgY: Map<string, number>;
+  } {
     const elements: cytoscape.ElementDefinition[] = [];
     const msgOrder = topologicalSort(trajectory.messages);
 
@@ -74,7 +77,8 @@
     const msgY = new Map<string, number>();
     for (const msg of msgOrder) {
       msgY.set(msg.id, currentY);
-      const blockClusterHeight = msg.blocks.length * BLOCK_SPACING;
+      // Blocks now share the message's Y, so they don't add vertical height
+      const blockClusterHeight = 0;
       const spacing = Math.max(MIN_MSG_SPACING, blockClusterHeight + PADDING);
       currentY += spacing;
     }
@@ -94,13 +98,12 @@
       });
     }
 
-    // Create block nodes
+    // Create block nodes (all blocks from same message share the message's Y)
     for (const msg of msgOrder) {
       const my = msgY.get(msg.id)!;
       const n = msg.blocks.length;
       for (let i = 0; i < n; i++) {
         const block = msg.blocks[i];
-        const yOffset = (i - (n - 1) / 2) * BLOCK_SPACING;
         elements.push({
           data: {
             id: block.id,
@@ -109,7 +112,7 @@
             stroke: getStrokeColor(block.kind),
             isMessage: false,
           },
-          position: { x: MSG_X + BLOCK_X_OFFSET + i * BLOCK_H_SPACING, y: my + yOffset },
+          position: { x: MSG_X + BLOCK_X_OFFSET + i * BLOCK_H_SPACING, y: my },
         });
       }
     }
@@ -148,7 +151,7 @@
       }
     }
 
-    return elements;
+    return { elements, msgOrder, msgY };
   }
 
   function createCy() {
@@ -165,9 +168,11 @@
       cy = null;
     }
 
+    const { elements, msgOrder, msgY } = buildElements();
+
     cy = cytoscape({
       container,
-      elements: buildElements(),
+      elements,
       style: [
         {
           selector: "node",
@@ -238,17 +243,41 @@
       ] as any,
       layout: {
         name: "preset",
-        fit: true,
+        fit: false,
         padding: 40,
       } as any,
-      minZoom: 0.1,
+      minZoom: 0.05,
       maxZoom: 3,
       wheelSensitivity: 0.3,
     });
 
+    // Fix zoom so that ~10 message nodes fill the viewport vertically
+    if (msgOrder.length > 0) {
+      const targetCount = Math.min(10, msgOrder.length);
+      const targetHeight = msgY.get(msgOrder[targetCount - 1].id)! + MIN_MSG_SPACING;
+      const zoom = Math.min(3, Math.max(0.05, rect.height / targetHeight));
+      cy.zoom(zoom);
+      cy.center(cy.getElementById(msgOrder[0].id));
+    }
+
     cy.on("tap", "node", (evt: cytoscape.EventObjectNode) => {
       const id = evt.target.id();
       if (id) onSelect(id);
+    });
+
+    cy.on("dbltap", "node", (evt: cytoscape.EventObjectNode) => {
+      const id = evt.target.id();
+      if (!id || !cy) return;
+      const ele = cy.getElementById(id);
+      if (ele.length > 0) {
+        cy.animate(
+          {
+            center: { eles: ele },
+            zoom: cy.zoom(),
+          },
+          { duration: 300 }
+        );
+      }
     });
   }
 
@@ -258,7 +287,16 @@
     const id = selectedId;
     if (id) {
       const ele = cy.getElementById(id);
-      if (ele.length > 0) ele.select();
+      if (ele.length > 0) {
+        ele.select();
+        cy.animate(
+          {
+            center: { eles: ele },
+            zoom: cy.zoom(),
+          },
+          { duration: 150 }
+        );
+      }
     }
   }
 

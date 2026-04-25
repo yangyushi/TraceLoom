@@ -71,6 +71,12 @@
     const nextId = getNavigationTarget(e.key);
     if (nextId) {
       onSelect(nextId);
+      requestAnimationFrame(() => {
+        const el = document.querySelector(`[data-id="${nextId}"]`);
+        if (el) {
+          el.scrollIntoView({ block: "center", behavior: "smooth" });
+        }
+      });
     }
   }
 </script>
@@ -81,6 +87,7 @@
   {#each trajectory.messages as msg}
     <div
       class="brick message-brick"
+      data-id={msg.id}
       class:selected={isMessageSelected(msg)}
       class:sidechain={msg.is_sidechain}
       style="border-left-color: {getStrokeColor(msg.role)};"
@@ -103,6 +110,7 @@
     {#each msg.blocks as block}
       <div
         class="brick block-brick"
+        data-id={block.id}
         class:selected={isBlockSelected(block)}
         class:sidechain={msg.is_sidechain}
         style="border-left-color: {getStrokeColor(block.kind)}; margin-left: 24px;"

@@ -87,7 +87,7 @@ impl Trajectory {
 
     pub fn validate(&mut self) -> Result<(), ParseError> {
         let mut ids = HashSet::new();
-        let msg_ids: HashSet<_> = self.messages.iter().map(|m| &m.id).collect();
+        let _msg_ids: HashSet<_> = self.messages.iter().map(|m| &m.id).collect();
 
         // Check duplicate message IDs
         for msg in &self.messages {

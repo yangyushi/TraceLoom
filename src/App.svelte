@@ -203,6 +203,7 @@
           {/each}
         </div>
       </aside>
+      <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
       <div class="resize-handle" onmousedown={startResizeLeft} role="separator" tabindex="-1" aria-label="Resize file list"></div>
     {/if}
 
@@ -219,6 +220,7 @@
     </div>
 
     {#if selectedItem}
+      <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
       <div class="resize-handle" onmousedown={startResizeRight} role="separator" tabindex="-1" aria-label="Resize inspector"></div>
       <aside class="inspector" style="width: {rightWidth}px;">
         <NodeDetail item={selectedItem} onClose={() => (selectedId = null)} />
