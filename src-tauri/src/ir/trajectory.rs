@@ -120,9 +120,9 @@ impl Trajectory {
         for msg in &self.messages {
             if let Some(ref pid) = msg.parent_id {
                 if let Some(parent) = self.messages.iter().find(|m| &m.id == pid) {
-                    // Temporal validation
+                    // Temporal validation (tolerate up to 1s of clock skew)
                     if let (Some(pt), Some(ct)) = (parent.timestamp, msg.timestamp) {
-                        if pt > ct {
+                        if pt > ct + chrono::Duration::seconds(1) {
                             return Err(ParseError::InvalidTrajectory(format!(
                                 "temporal violation: parent {} ({}) is after child {} ({})",
                                 pid, pt, msg.id, ct

@@ -30,7 +30,7 @@
       inDegree.set(m.id, 0);
     }
     for (const m of messages) {
-      if (m.parent_id) {
+      if (m.parent_id && msgMap.has(m.parent_id)) {
         adj.set(m.parent_id, [...(adj.get(m.parent_id) || []), m.id]);
         inDegree.set(m.id, (inDegree.get(m.id) || 0) + 1);
       }
@@ -117,9 +117,12 @@
       }
     }
 
+    // Collect all node IDs so we never create edges to missing nodes
+    const nodeIds = new Set(elements.map((el) => el.data!.id as string));
+
     // Create edges
     for (const msg of msgOrder) {
-      if (msg.parent_id) {
+      if (msg.parent_id && nodeIds.has(msg.parent_id)) {
         elements.push({
           data: {
             id: `${msg.parent_id}-${msg.id}`,
@@ -138,7 +141,7 @@
             edgeType: "contain",
           },
         });
-        if (block.tool_call_id) {
+        if (block.tool_call_id && nodeIds.has(block.tool_call_id)) {
           elements.push({
             data: {
               id: `${block.tool_call_id}-${block.id}`,
