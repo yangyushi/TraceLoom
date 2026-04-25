@@ -1,5 +1,5 @@
 <script lang="ts">
-  import type { Trajectory, Node } from "../types/ir";
+  import type { Trajectory, Node, Message, Block } from "../types/ir";
   import { getStrokeColor } from "../lib/colors";
 
   interface Props {
@@ -10,97 +10,95 @@
 
   let { trajectory, onSelect, selectedNode }: Props = $props();
 
-  function topoSort(nodes: Node[], edges: { from: string; to: string }[]): Node[] {
-    const idToNode = new Map(nodes.map((n) => [n.id, n]));
-    const inDegree = new Map<string, number>();
-    const adj = new Map<string, string[]>();
-    nodes.forEach((n) => {
-      inDegree.set(n.id, 0);
-      adj.set(n.id, []);
-    });
-    edges.forEach((e) => {
-      if (adj.has(e.from) && idToNode.has(e.to)) {
-        adj.get(e.from)!.push(e.to);
-        inDegree.set(e.to, (inDegree.get(e.to) || 0) + 1);
-      }
-    });
-    const queue = nodes
-      .filter((n) => (inDegree.get(n.id) || 0) === 0)
-      .sort((a, b) => {
-        const ta = a.timestamp ? new Date(a.timestamp).getTime() : 0;
-        const tb = b.timestamp ? new Date(b.timestamp).getTime() : 0;
-        return ta - tb;
-      });
-    const result: Node[] = [];
-    const visited = new Set<string>();
-    while (queue.length) {
-      const node = queue.shift()!;
-      if (visited.has(node.id)) continue;
-      visited.add(node.id);
-      result.push(node);
-      const children = (adj.get(node.id) || [])
-        .map((id) => idToNode.get(id)!)
-        .filter(Boolean)
-        .sort((a, b) => {
-          const ta = a.timestamp ? new Date(a.timestamp).getTime() : 0;
-          const tb = b.timestamp ? new Date(b.timestamp).getTime() : 0;
-          return ta - tb;
-        });
-      for (const child of children) {
-        const deg = (inDegree.get(child.id) || 0) - 1;
-        inDegree.set(child.id, deg);
-        if (deg === 0 && !visited.has(child.id)) {
-          queue.push(child);
-        }
-      }
-    }
-    nodes.forEach((n) => {
-      if (!visited.has(n.id)) result.push(n);
-    });
-    return result;
+  const nodeById = $derived(
+    new Map(trajectory.nodes.map((n) => [n.id, n]))
+  );
+
+  function handleSelectMessage(msg: Message) {
+    const node = nodeById.get(msg.id);
+    if (node) onSelect(node);
   }
 
-  const sortedNodes = $derived(topoSort(trajectory.nodes, trajectory.edges));
+  function handleSelectBlock(block: Block) {
+    const node = nodeById.get(block.id);
+    if (node) onSelect(node);
+  }
+
+  function isMessageSelected(msg: Message): boolean {
+    return selectedNode?.id === msg.id;
+  }
+
+  function isBlockSelected(block: Block): boolean {
+    return selectedNode?.id === block.id;
+  }
 
   function formatTimestamp(ts: string | null): string {
     if (!ts) return "";
     return new Date(ts).toLocaleTimeString();
   }
+
+  function getBlockPreview(content: Block["content"]): string {
+    switch (content.type) {
+      case "Text":
+        return content.data.slice(0, 120) + (content.data.length > 120 ? "..." : "");
+      case "ToolUse":
+        return `Tool: ${content.data.name}`;
+      case "ToolResult":
+        return `Result: ${content.data.output.slice(0, 120)}${content.data.output.length > 120 ? "..." : ""}`;
+      case "Thinking":
+        return content.data.encrypted ? "[encrypted reasoning]" : content.data.text.slice(0, 120) + (content.data.text.length > 120 ? "..." : "");
+      case "Snapshot":
+        return content.data.description;
+      case "Custom":
+        return `[${content.data.kind}]`;
+      default:
+        return `[${(content as { type: string }).type}]`;
+    }
+  }
 </script>
 
 <div class="bricks-container">
-  {#each sortedNodes as node}
+  {#each trajectory.messages as msg}
     <div
-      class="brick"
-      class:selected={selectedNode?.id === node.id}
-      class:sidechain={node.is_sidechain}
-      style="border-left-color: {getStrokeColor(node.kind)}"
-      onclick={() => onSelect(node)}
+      class="brick message-brick"
+      class:selected={isMessageSelected(msg)}
+      class:sidechain={msg.is_sidechain}
+      style="border-left-color: {getStrokeColor(msg.role[0])};"
+      onclick={() => handleSelectMessage(msg)}
       role="button"
       tabindex="0"
-      onkeydown={(e) => e.key === "Enter" && onSelect(node)}
+      onkeydown={(e) => e.key === "Enter" && handleSelectMessage(msg)}
     >
       <div class="brick-header">
-        <span class="kind">{node.kind}</span>
-        <span class="role">{node.role[0]}</span>
-        {#if node.timestamp}
-          <span class="time">{formatTimestamp(node.timestamp)}</span>
+        <span class="kind">{msg.role[0]}</span>
+        {#if msg.timestamp}
+          <span class="time">{formatTimestamp(msg.timestamp)}</span>
         {/if}
       </div>
-      <div class="brick-preview">
-        {#if node.content.type === "Text"}
-          {node.content.data.slice(0, 120)}{node.content.data.length > 120 ? "..." : ""}
-        {:else if node.content.type === "ToolUse"}
-          Tool: {node.content.data.name}
-        {:else if node.content.type === "ToolResult"}
-          Result: {node.content.data.output.slice(0, 120)}
-        {:else if node.content.type === "Thinking"}
-          {node.content.data.encrypted ? "[encrypted reasoning]" : node.content.data.text.slice(0, 120)}
-        {:else}
-          [{node.content.type}]
-        {/if}
-      </div>
+      {#if msg.blocks.length > 0}
+        <div class="brick-meta">{msg.blocks.length} block{msg.blocks.length > 1 ? 's' : ''}</div>
+      {/if}
     </div>
+
+    {#each msg.blocks as block}
+      <div
+        class="brick block-brick"
+        class:selected={isBlockSelected(block)}
+        class:sidechain={msg.is_sidechain}
+        style="border-left-color: {getStrokeColor(block.kind)}; margin-left: 24px;"
+        onclick={() => handleSelectBlock(block)}
+        role="button"
+        tabindex="0"
+        onkeydown={(e) => e.key === "Enter" && handleSelectBlock(block)}
+      >
+        <div class="brick-header">
+          <span class="kind">{block.kind}</span>
+        </div>
+        <div class="brick-preview">
+          {getBlockPreview(block.content)}
+        </div>
+      </div>
+    {/each}
   {/each}
 </div>
 
@@ -139,11 +137,18 @@
     opacity: 0.6;
   }
 
+  .message-brick {
+    background: #ffffff;
+  }
+
+  .block-brick {
+    background: #f8f9fa;
+  }
+
   .brick-header {
     display: flex;
     align-items: center;
     gap: 10px;
-    margin-bottom: 6px;
     font-size: 12px;
   }
 
@@ -154,17 +159,15 @@
     letter-spacing: 0.5px;
   }
 
-  .role {
-    color: #868e96;
-    background: #f1f3f5;
-    padding: 2px 6px;
-    border-radius: 3px;
-    font-size: 11px;
-  }
-
   .time {
     margin-left: auto;
     color: #adb5bd;
+  }
+
+  .brick-meta {
+    color: #868e96;
+    font-size: 11px;
+    margin-top: 4px;
   }
 
   .brick-preview {
@@ -173,5 +176,6 @@
     line-height: 1.4;
     white-space: pre-wrap;
     word-break: break-word;
+    margin-top: 6px;
   }
 </style>

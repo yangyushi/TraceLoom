@@ -1,6 +1,11 @@
 <script lang="ts">
   import type { Trajectory, Node } from "../types/ir";
-  import { getFillColor } from "../lib/colors";
+  import { getFillColor, getStrokeColor } from "../lib/colors";
+  import cytoscape from "cytoscape";
+  import dagre from "cytoscape-dagre";
+  import { onDestroy } from "svelte";
+
+  cytoscape.use(dagre);
 
   interface Props {
     trajectory: Trajectory;
@@ -10,122 +15,169 @@
 
   let { trajectory, onSelect, selectedNode }: Props = $props();
 
-  function getLabel(node: Node): string {
-    return node.kind;
+  let container: HTMLDivElement | null = $state(null);
+  let cy: cytoscape.Core | null = null;
+
+  const msgById = $derived(new Map(trajectory.messages.map((m) => [m.id, m])));
+
+  function isMessageNode(node: Node): boolean {
+    return msgById.has(node.id);
   }
 
-  function getTitle(node: Node): string {
-    const ts = node.timestamp ? new Date(node.timestamp).toLocaleString() : "no time";
-    return `${node.kind} | ${node.role[0]} | ${ts}`;
-  }
+  function buildElements(): cytoscape.ElementDefinition[] {
+    const elements: cytoscape.ElementDefinition[] = [];
 
-  function topoSort(nodes: Node[], edges: { from: string; to: string }[]): Node[] {
-    const idToNode = new Map(nodes.map((n) => [n.id, n]));
-    const inDegree = new Map<string, number>();
-    const adj = new Map<string, string[]>();
-    nodes.forEach((n) => {
-      inDegree.set(n.id, 0);
-      adj.set(n.id, []);
-    });
-    edges.forEach((e) => {
-      if (adj.has(e.from) && idToNode.has(e.to)) {
-        adj.get(e.from)!.push(e.to);
-        inDegree.set(e.to, (inDegree.get(e.to) || 0) + 1);
-      }
-    });
-    const queue = nodes
-      .filter((n) => (inDegree.get(n.id) || 0) === 0)
-      .sort((a, b) => {
-        const ta = a.timestamp ? new Date(a.timestamp).getTime() : 0;
-        const tb = b.timestamp ? new Date(b.timestamp).getTime() : 0;
-        return ta - tb;
+    for (const node of trajectory.nodes) {
+      const isMsg = isMessageNode(node);
+      const label = isMsg ? node.role[0] : node.kind;
+      const color = getFillColor(isMsg ? node.role[0] : node.kind);
+      const stroke = getStrokeColor(isMsg ? node.role[0] : node.kind);
+
+      elements.push({
+        data: {
+          id: node.id,
+          label,
+          color,
+          stroke,
+          isMessage: isMsg,
+          _node: node,
+        },
       });
-    const result: Node[] = [];
-    const visited = new Set<string>();
-    while (queue.length) {
-      const node = queue.shift()!;
-      if (visited.has(node.id)) continue;
-      visited.add(node.id);
-      result.push(node);
-      const children = (adj.get(node.id) || [])
-        .map((id) => idToNode.get(id)!)
-        .filter(Boolean)
-        .sort((a, b) => {
-          const ta = a.timestamp ? new Date(a.timestamp).getTime() : 0;
-          const tb = b.timestamp ? new Date(b.timestamp).getTime() : 0;
-          return ta - tb;
-        });
-      for (const child of children) {
-        const deg = (inDegree.get(child.id) || 0) - 1;
-        inDegree.set(child.id, deg);
-        if (deg === 0 && !visited.has(child.id)) {
-          queue.push(child);
-        }
-      }
     }
-    nodes.forEach((n) => {
-      if (!visited.has(n.id)) result.push(n);
-    });
-    return result;
+
+    for (const edge of trajectory.edges) {
+      elements.push({
+        data: {
+          id: `${edge.from}-${edge.to}`,
+          source: edge.from,
+          target: edge.to,
+        },
+      });
+    }
+
+    return elements;
   }
 
-  const sortedNodes = $derived(topoSort(trajectory.nodes, trajectory.edges));
-  const spacing = 40;
-  const radius = 10;
-  const svgWidth = 200;
-  const svgHeight = $derived(sortedNodes.length * spacing + spacing);
+  function createCy() {
+    if (!container) return;
+
+    // Make sure the container has non-zero dimensions before init
+    const rect = container.getBoundingClientRect();
+    if (rect.width === 0 || rect.height === 0) {
+      requestAnimationFrame(createCy);
+      return;
+    }
+
+    if (cy) {
+      cy.destroy();
+      cy = null;
+    }
+
+    cy = cytoscape({
+      container,
+      elements: buildElements(),
+      style: [
+        {
+          selector: "node",
+          style: {
+            "background-color": "data(color)",
+            "border-color": "data(stroke)",
+            "border-width": 2,
+            width: (ele: any) => (ele.data("isMessage") ? "36px" : "20px"),
+            height: (ele: any) => (ele.data("isMessage") ? "36px" : "20px"),
+            label: "data(label)",
+            "font-size": (ele: any) =>
+              ele.data("isMessage") ? "13px" : "10px",
+            "text-valign": "bottom",
+            "text-halign": "center",
+            "text-margin-y": 5,
+            color: "#495057",
+            "font-weight": (ele: any) =>
+              ele.data("isMessage") ? "bold" : "normal",
+            "text-background-color": "#f8f9fa",
+            "text-background-opacity": 0.8,
+            "text-background-padding": 2,
+          } as any,
+        },
+        {
+          selector: "edge",
+          style: {
+            width: 1.5,
+            "line-color": "#ced4da",
+            "target-arrow-color": "#ced4da",
+            "target-arrow-shape": "triangle",
+            "curve-style": "bezier",
+            "arrow-scale": 0.7,
+          } as any,
+        },
+        {
+          selector: ":selected",
+          style: {
+            "border-color": "#212529",
+            "border-width": 3,
+            "background-color": "#e7f5ff",
+          } as any,
+        },
+      ] as any,
+      layout: {
+        name: "dagre",
+        rankDir: "TB",
+        nodeSep: 80,
+        rankSep: 100,
+        padding: 24,
+      } as any,
+      minZoom: 0.15,
+      maxZoom: 3,
+      wheelSensitivity: 0.3,
+    });
+
+    cy.on("tap", "node", (evt: cytoscape.EventObjectNode) => {
+      const nodeData = evt.target.data("_node") as Node;
+      if (nodeData) onSelect(nodeData);
+    });
+  }
+
+  function updateSelection() {
+    if (!cy) return;
+    cy.nodes().unselect();
+    const id = selectedNode?.id;
+    if (id) {
+      const ele = cy.getElementById(id);
+      if (ele.length > 0) ele.select();
+    }
+  }
+
+  // Initialize when container is bound or trajectory changes
+  $effect(() => {
+    const c = container;
+    const t = trajectory;
+    void t; // establish reactivity dependency
+    if (c) {
+      createCy();
+    }
+  });
+
+  // Update selection highlight when selectedNode changes
+  $effect(() => {
+    const id = selectedNode?.id;
+    void id;
+    updateSelection();
+  });
+
+  onDestroy(() => {
+    if (cy) {
+      cy.destroy();
+      cy = null;
+    }
+  });
 </script>
 
-<div class="dots-container">
-  <svg width={svgWidth} height={svgHeight}>
-    <line x1={svgWidth / 2} y1={spacing} x2={svgWidth / 2} y2={svgHeight - spacing} stroke="#dee2e6" stroke-width="2" />
-    {#each sortedNodes as node, i}
-      <g
-        class="dot-group"
-        class:selected={selectedNode?.id === node.id}
-        class:sidechain={node.is_sidechain}
-        onclick={() => onSelect(node)}
-        onkeydown={(e) => e.key === "Enter" && onSelect(node)}
-        role="button"
-        tabindex="0"
-        style="cursor: pointer;"
-        transform="translate({svgWidth / 2}, {spacing + i * spacing})"
-      >
-        <circle
-          r={radius}
-          fill={getFillColor(node.kind)}
-          stroke={selectedNode?.id === node.id ? "#212529" : "transparent"}
-          stroke-width="2"
-        />
-        <text x={radius + 14} y={4} text-anchor="start" fill="#495057" font-size="11">{getLabel(node)}</text>
-        <title>{getTitle(node)}</title>
-      </g>
-    {/each}
-  </svg>
-</div>
+<div class="dots-container" bind:this={container}></div>
 
 <style>
   .dots-container {
-    padding: 24px;
-    overflow: auto;
-    display: flex;
-    justify-content: center;
-  }
-
-  .dot-group:hover circle {
-    filter: brightness(1.15);
-  }
-
-  .dot-group.selected circle {
-    stroke: #212529;
-    stroke-width: 2;
-  }
-
-  .dot-group.sidechain {
-    opacity: 0.5;
-  }
-
-  .dot-group.sidechain circle {
-    stroke-dasharray: 3 2;
+    width: 100%;
+    height: 100%;
+    background: #f8f9fa;
   }
 </style>

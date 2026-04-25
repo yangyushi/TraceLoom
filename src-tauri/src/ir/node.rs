@@ -35,6 +35,7 @@ impl Default for Role {
 pub struct Node {
     pub id: NodeId,
     pub parent_id: Option<NodeId>,
+    pub message_id: Option<NodeId>,
     pub kind: String,
     pub role: Role,
     pub content: Content,
@@ -48,6 +49,7 @@ impl Node {
         Self {
             id: id.into(),
             parent_id: None,
+            message_id: None,
             kind: kind.into(),
             role,
             content: Content::Empty,
@@ -74,6 +76,11 @@ impl Node {
 
     pub fn with_metadata(mut self, key: impl Into<String>, value: serde_json::Value) -> Self {
         self.metadata.insert(key.into(), value);
+        self
+    }
+
+    pub fn with_message_id(mut self, message_id: impl Into<NodeId>) -> Self {
+        self.message_id = Some(message_id.into());
         self
     }
 

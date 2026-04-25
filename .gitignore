@@ -3,3 +3,5 @@
 src-tauri/target
 dist
 node_modules
+test/**/*.py
+test/**/out.jsonl

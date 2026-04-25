@@ -1,14 +1,32 @@
 export interface Trajectory {
   session_id: string;
+  messages: Message[];
   nodes: Node[];
   edges: Edge[];
   orphans: string[];
   warnings: string[];
 }
 
+export interface Message {
+  id: string;
+  parent_id: string | null;
+  role: Role;
+  timestamp: string | null;
+  blocks: Block[];
+  is_sidechain: boolean;
+}
+
+export interface Block {
+  id: string;
+  kind: string;
+  content: Content;
+  tool_call_id: string | null;
+}
+
 export interface Node {
   id: string;
   parent_id: string | null;
+  message_id: string | null;
   kind: string;
   role: Role;
   content: Content;

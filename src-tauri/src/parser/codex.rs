@@ -2,7 +2,7 @@ use chrono::{DateTime, Utc};
 use serde_json::Value;
 
 use crate::error::ParseError;
-use crate::ir::{Content, Node, Role, Trajectory};
+use crate::ir::{Block, Content, Message, Role, Trajectory};
 
 pub fn parse(contents: &str) -> Result<Trajectory, ParseError> {
     let mut trajectory = Trajectory::new("codex-session");
@@ -25,38 +25,35 @@ pub fn parse(contents: &str) -> Result<Trajectory, ParseError> {
         let record_type = value.get("type").and_then(|t| t.as_str());
         let timestamp = parse_timestamp(value.get("timestamp"));
 
-        match record_type {
+        id_counter += 1;
+
+        let message = match record_type {
             Some("response_item") => {
                 if let Some(payload) = value.get("payload") {
-                    id_counter += 1;
-                    if let Some(node) = parse_response_item(payload, timestamp, id_counter)? {
-                        trajectory.add_node(node.clone());
-                        if let Some(ref parent_id) = node.parent_id {
-                            trajectory.add_edge(crate::ir::Edge::new(parent_id.clone(), node.id.clone()));
-                        }
-                    }
+                    Some(parse_response_item(payload, timestamp, id_counter)?)
+                } else {
+                    None
                 }
             }
             Some("event_msg") => {
                 if let Some(payload) = value.get("payload") {
-                    id_counter += 1;
-                    if let Some(node) = parse_event_msg(payload, timestamp, id_counter)? {
-                        trajectory.add_node(node.clone());
-                        if let Some(ref parent_id) = node.parent_id {
-                            trajectory.add_edge(crate::ir::Edge::new(parent_id.clone(), node.id.clone()));
-                        }
-                    }
+                    parse_event_msg(payload, timestamp, id_counter)
+                } else {
+                    None
                 }
             }
             Some("session_meta") => {
                 if let Some(id) = value.get("payload").and_then(|p| p.get("id")).and_then(|i| i.as_str()) {
                     session_id = Some(id.to_string());
                 }
+                None
             }
-            Some("turn_context") => {
-                // Contains collaboration mode info, skip as standalone node
-            }
-            _ => {}
+            Some("turn_context") => None,
+            _ => None,
+        };
+
+        if let Some(msg) = message {
+            trajectory.add_message(msg);
         }
     }
 
@@ -64,48 +61,49 @@ pub fn parse(contents: &str) -> Result<Trajectory, ParseError> {
         trajectory.session_id = sid;
     }
 
+    trajectory.flatten();
     Ok(trajectory)
 }
 
-fn parse_response_item(payload: &Value, timestamp: Option<DateTime<Utc>>, counter: u64) -> Result<Option<Node>, ParseError> {
+fn parse_response_item(payload: &Value, timestamp: Option<DateTime<Utc>>, counter: u64) -> Result<Message, ParseError> {
     let role = payload["role"].as_str().unwrap_or("assistant");
     let item_type = payload["type"].as_str().unwrap_or("message");
 
     let id = if let Some(turn_id) = payload.get("turn_id").and_then(|t| t.as_str()) {
-        format!("codex-{}-{}", turn_id, counter)
+        format!("codex-turn-{}-{}-{}", turn_id, counter, payload.get("id").and_then(|i| i.as_str()).unwrap_or("x"))
     } else {
-        format!("codex-{}", counter)
+        format!("codex-item-{}-{}", counter, payload.get("id").and_then(|i| i.as_str()).unwrap_or("x"))
     };
+
+    let mut msg = Message::new(&id, Role(role.to_string()));
+    if let Some(ts) = timestamp {
+        msg = msg.with_timestamp(ts);
+    }
 
     match item_type {
         "message" => {
-            let content_blocks = payload["content"].as_array();
-            let mut nodes = Vec::new();
-
-            if let Some(blocks) = content_blocks {
-                for block in blocks {
+            if let Some(blocks) = payload["content"].as_array() {
+                for (idx, block) in blocks.iter().enumerate() {
                     let block_type = block["type"].as_str().unwrap_or("text");
                     match block_type {
                         "input_text" | "output_text" => {
                             let text = block["text"].as_str().unwrap_or("").to_string();
                             let kind = if role == "user" { "user" } else { "text" };
-                            let mut node = Node::new(&id, kind, Role(role.to_string()))
-                                .with_content(Content::Text(text));
-                            if let Some(ts) = timestamp {
-                                node = node.with_timestamp(ts);
-                            }
-                            nodes.push(node);
+                            let block_id = format!("{}-text-{}", id, idx);
+                            let blk = Block::new(&block_id, kind, Content::Text(text));
+                            msg = msg.with_block(blk);
                         }
                         "reasoning" => {
-                            let mut node = Node::new(&id, "think", Role::assistant())
-                                .with_content(Content::Thinking {
+                            let block_id = format!("{}-think-{}", id, idx);
+                            let blk = Block::new(
+                                &block_id,
+                                "think",
+                                Content::Thinking {
                                     text: String::new(),
                                     encrypted: true,
-                                });
-                            if let Some(ts) = timestamp {
-                                node = node.with_timestamp(ts);
-                            }
-                            nodes.push(node);
+                                },
+                            );
+                            msg = msg.with_block(blk);
                         }
                         "input_image" => {
                             // skip images for now
@@ -115,30 +113,80 @@ fn parse_response_item(payload: &Value, timestamp: Option<DateTime<Utc>>, counte
                 }
             }
 
-            Ok(nodes.into_iter().last())
+            if msg.blocks.is_empty() {
+                let block_id = format!("{}-text", id);
+                let blk = Block::new(&block_id, "text", Content::Empty);
+                msg = msg.with_block(blk);
+            }
+
+            Ok(msg)
         }
         "reasoning" => {
-            let mut node = Node::new(&id, "think", Role::assistant())
-                .with_content(Content::Thinking {
+            let block_id = format!("{}-think", id);
+            let blk = Block::new(
+                &block_id,
+                "think",
+                Content::Thinking {
                     text: String::new(),
                     encrypted: true,
-                });
-            if let Some(ts) = timestamp {
-                node = node.with_timestamp(ts);
-            }
-            Ok(Some(node))
+                },
+            );
+            msg = msg.with_block(blk);
+            Ok(msg)
         }
-        _ => Ok(None),
+        "function_call" => {
+            let name = payload["name"].as_str().unwrap_or("unknown").to_string();
+            let input = payload["arguments"].clone();
+            let call_id = payload["call_id"].as_str().map(|s| s.to_string()).unwrap_or_else(|| format!("{}-call", id));
+            let blk = Block::new(
+                &call_id,
+                "tool_call",
+                Content::ToolUse { name, input },
+            );
+            msg = msg.with_block(blk);
+            Ok(msg)
+        }
+        "function_call_output" => {
+            let call_id = payload["call_id"].as_str();
+            let output = payload["output"].as_str().unwrap_or("").to_string();
+            let result_id = format!("{}-output", id);
+            let blk = Block::new(
+                &result_id,
+                "tool_result",
+                Content::ToolResult {
+                    output,
+                    is_error: false,
+                },
+            );
+            let blk = match call_id {
+                Some(tcid) => blk.with_tool_call_id(tcid),
+                None => blk,
+            };
+            msg = msg.with_block(blk);
+            Ok(msg)
+        }
+        _ => {
+            let block_id = format!("{}-block", id);
+            let blk = Block::new(&block_id, item_type, Content::Empty);
+            msg = msg.with_block(blk);
+            Ok(msg)
+        }
     }
 }
 
-fn parse_event_msg(payload: &Value, timestamp: Option<DateTime<Utc>>, counter: u64) -> Result<Option<Node>, ParseError> {
+fn parse_event_msg(payload: &Value, timestamp: Option<DateTime<Utc>>, counter: u64) -> Option<Message> {
     let event_type = payload["type"].as_str().unwrap_or("unknown");
     let id = format!(
-        "codex-event-{}-{}",
+        "codex-event-{}-{}-{}",
         payload["turn_id"].as_str().unwrap_or("x"),
-        counter
+        counter,
+        event_type
     );
+
+    let mut msg = Message::new(&id, Role::system());
+    if let Some(ts) = timestamp {
+        msg = msg.with_timestamp(ts);
+    }
 
     let (kind, content) = match event_type {
         "task_started" => ("event_task_started", Content::Custom {
@@ -171,12 +219,9 @@ fn parse_event_msg(payload: &Value, timestamp: Option<DateTime<Utc>>, counter: u
         }),
     };
 
-    let mut node = Node::new(&id, kind, Role::system())
-        .with_content(content);
-    if let Some(ts) = timestamp {
-        node = node.with_timestamp(ts);
-    }
-    Ok(Some(node))
+    let blk = Block::new(&id, kind, content);
+    msg = msg.with_block(blk);
+    Some(msg)
 }
 
 fn parse_timestamp(value: Option<&Value>) -> Option<DateTime<Utc>> {
@@ -202,8 +247,57 @@ mod tests {
         .unwrap();
         let traj = parse(&contents).unwrap();
         assert!(!traj.nodes.is_empty());
-        // Should have user messages and assistant responses
         assert!(traj.nodes.iter().any(|n| n.role.0 == "user"));
         assert!(traj.nodes.iter().any(|n| n.role.0 == "assistant"));
+    }
+
+    #[test]
+    fn test_codex_function_call_handling() {
+        let jsonl = r#"{"type":"response_item","timestamp":"2026-01-01T00:00:00Z","payload":{"type":"function_call","call_id":"call-abc","name":"exec","arguments":"{}"}}
+{"type":"response_item","timestamp":"2026-01-01T00:00:01Z","payload":{"type":"function_call_output","call_id":"call-abc","output":"done"}}"#;
+        let traj = parse(jsonl).unwrap();
+        let tool_call = traj.nodes.iter().find(|n| n.kind == "tool_call").expect("tool_call node");
+        assert_eq!(tool_call.id, "call-abc", "tool_call must use call_id");
+        let tool_result = traj.nodes.iter().find(|n| n.kind == "tool_result").expect("tool_result node");
+        assert_eq!(tool_result.parent_id, Some("call-abc".to_string()), "tool_result must link to tool_call via call_id");
+        assert!(traj.edges.iter().any(|e| e.from == "call-abc" && e.to == tool_result.id), "edge tool_call -> tool_result must exist");
+    }
+
+    #[test]
+    fn test_function_call_output_envelope_preserved() {
+        let jsonl = r#"{"type":"response_item","timestamp":"2026-01-01T00:00:00Z","payload":{"type":"function_call","call_id":"call-abc","name":"exec","arguments":"{}"}}
+{"type":"response_item","timestamp":"2026-01-01T00:00:01Z","payload":{"type":"function_call_output","call_id":"call-abc","output":"done"}}"#;
+        let traj = parse(jsonl).unwrap();
+
+        // Envelope for function_call_output must exist
+        let tool_result = traj.nodes.iter().find(|n| n.kind == "tool_result").expect("tool_result node");
+        let output_msg_id = tool_result.message_id.clone().expect("tool_result must have message_id");
+        assert!(
+            traj.nodes.iter().any(|n| n.id == output_msg_id),
+            "envelope node for function_call_output must exist"
+        );
+
+        // Tool result block must have containment edge from its message envelope
+        assert!(
+            traj.edges.iter().any(|e| e.from == output_msg_id && e.to == tool_result.id),
+            "containment edge output message -> tool_result missing"
+        );
+
+        // Semantic link from tool_call to tool_result
+        assert!(
+            traj.edges.iter().any(|e| e.from == "call-abc" && e.to == tool_result.id),
+            "semantic edge call-abc -> tool_result missing"
+        );
+    }
+
+    #[test]
+    fn test_missing_call_id_does_not_create_empty_edge() {
+        let jsonl = r#"{"type":"response_item","timestamp":"2026-01-01T00:00:00Z","payload":{"type":"function_call_output","output":"done"}}"#;
+        let traj = parse(jsonl).unwrap();
+        // No edge from "" should be created
+        assert!(
+            !traj.edges.iter().any(|e| e.from.is_empty()),
+            "must not create edge from empty string when call_id is missing"
+        );
     }
 }

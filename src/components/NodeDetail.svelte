@@ -1,6 +1,6 @@
 <script lang="ts">
   import { marked } from "marked";
-  import Prism from "prismjs";
+  import * as Prism from "prismjs";
   import "prismjs/components/prism-json";
   import type { Node } from "../types/ir";
 

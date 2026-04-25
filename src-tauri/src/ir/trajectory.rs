@@ -3,12 +3,13 @@ use std::collections::{HashMap, HashSet};
 use chrono::DateTime;
 use serde::{Deserialize, Serialize};
 
-use super::{Edge, Node, NodeId};
+use super::{Edge, Message, Node, NodeId};
 use crate::error::ParseError;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Trajectory {
     pub session_id: String,
+    pub messages: Vec<Message>,
     pub nodes: Vec<Node>,
     pub edges: Vec<Edge>,
     pub orphans: Vec<NodeId>,
@@ -19,11 +20,16 @@ impl Trajectory {
     pub fn new(session_id: impl Into<String>) -> Self {
         Self {
             session_id: session_id.into(),
+            messages: Vec::new(),
             nodes: Vec::new(),
             edges: Vec::new(),
             orphans: Vec::new(),
             warnings: Vec::new(),
         }
+    }
+
+    pub fn add_message(&mut self, message: Message) {
+        self.messages.push(message);
     }
 
     pub fn add_node(&mut self, node: Node) {
@@ -32,6 +38,87 @@ impl Trajectory {
 
     pub fn add_edge(&mut self, edge: Edge) {
         self.edges.push(edge);
+    }
+
+    /// Derive the flat graph (nodes + edges) from messages.
+    pub fn flatten(&mut self) {
+        self.nodes.clear();
+        self.edges.clear();
+
+        for msg in &self.messages {
+            let is_assistant = msg.role.0 == "assistant";
+
+            // Single-block, non-assistant messages where the block has no external
+            // tool_call_id: envelope absorbs the block to reduce graph noise.
+            if msg.blocks.len() == 1 && !is_assistant && msg.blocks[0].tool_call_id.is_none() {
+                let block = &msg.blocks[0];
+                let mut node = Node::new(&msg.id, &block.kind, msg.role.clone())
+                    .with_content(block.content.clone())
+                    .with_message_id(&msg.id);
+                if let Some(ref pid) = msg.parent_id {
+                    node = node.with_parent(pid.clone());
+                }
+                if let Some(ts) = msg.timestamp {
+                    node = node.with_timestamp(ts);
+                }
+                if msg.is_sidechain {
+                    node = node.with_sidechain();
+                }
+                self.nodes.push(node);
+
+                if let Some(ref pid) = msg.parent_id {
+                    self.edges.push(Edge::new(pid.clone(), msg.id.clone()));
+                }
+                continue;
+            }
+
+            // Create envelope node for every message
+            let mut envelope = Node::new(&msg.id, &msg.role.0, msg.role.clone())
+                .with_message_id(&msg.id);
+            if let Some(ref pid) = msg.parent_id {
+                envelope = envelope.with_parent(pid.clone());
+            }
+            if let Some(ts) = msg.timestamp {
+                envelope = envelope.with_timestamp(ts);
+            }
+            if msg.is_sidechain {
+                envelope = envelope.with_sidechain();
+            }
+            self.nodes.push(envelope);
+
+            if let Some(ref pid) = msg.parent_id {
+                self.edges.push(Edge::new(pid.clone(), msg.id.clone()));
+            }
+
+            for block in &msg.blocks {
+                let mut node = Node::new(&block.id, &block.kind, msg.role.clone())
+                    .with_content(block.content.clone())
+                    .with_message_id(&msg.id);
+
+                // All blocks are contained by their message envelope
+                self.edges.push(Edge::new(msg.id.clone(), block.id.clone()));
+
+                if let Some(ref tcid) = block.tool_call_id {
+                    if !tcid.is_empty() {
+                        // Tool result: also link semantically to the tool_call
+                        node = node.with_parent(tcid.clone());
+                        self.edges.push(Edge::new(tcid.clone(), block.id.clone()));
+                    } else {
+                        node = node.with_parent(msg.id.clone());
+                    }
+                } else {
+                    node = node.with_parent(msg.id.clone());
+                }
+
+                if let Some(ts) = msg.timestamp {
+                    node = node.with_timestamp(ts);
+                }
+                if msg.is_sidechain {
+                    node = node.with_sidechain();
+                }
+                self.nodes.push(node);
+            }
+        }
     }
 
     pub fn node_map(&self) -> HashMap<&NodeId, &Node> {
@@ -205,7 +292,7 @@ impl Trajectory {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ir::Role;
+    use crate::ir::{Block, Content, Role};
     use chrono::{TimeDelta, Utc};
 
     #[test]
@@ -300,5 +387,83 @@ mod tests {
         let order = traj.topological_order();
         let ids: Vec<_> = order.iter().map(|n| n.id.as_str()).collect();
         assert!(ids.iter().position(|&x| x == "a").unwrap() < ids.iter().position(|&x| x == "d").unwrap());
+    }
+
+    #[test]
+    fn test_flatten_creates_envelope_for_tool_result_messages() {
+        let mut traj = Trajectory::new("sess");
+        // assistant message with tool_call
+        let assistant_msg = Message::new("msg-1", Role::assistant())
+            .with_parent("msg-0")
+            .with_block(Block::new("tool-a", "tool_call", Content::ToolUse {
+                name: "Read".into(),
+                input: serde_json::Value::Null,
+            }));
+        // user message with only tool_result
+        let tool_result_msg = Message::new("msg-2", Role::user())
+            .with_parent("msg-1")
+            .with_block(Block::new("msg-2-result", "tool_result", Content::ToolResult {
+                output: "done".into(),
+                is_error: false,
+            }).with_tool_call_id("tool-a"));
+
+        traj.add_message(assistant_msg);
+        traj.add_message(tool_result_msg);
+        traj.flatten();
+
+        // Envelope must exist for the pure tool_result message
+        assert!(traj.nodes.iter().any(|n| n.id == "msg-2" && n.kind == "user"),
+            "envelope node for tool_result message must exist");
+
+        // Tool result block must exist
+        assert!(traj.nodes.iter().any(|n| n.id == "msg-2-result" && n.kind == "tool_result"),
+            "tool_result block node must exist");
+
+        // Parent chain: msg-1 -> msg-2
+        assert!(traj.edges.iter().any(|e| e.from == "msg-1" && e.to == "msg-2"),
+            "conversation chain edge msg-1 -> msg-2 must exist");
+
+        // Containment: msg-2 -> msg-2-result
+        assert!(traj.edges.iter().any(|e| e.from == "msg-2" && e.to == "msg-2-result"),
+            "containment edge msg-2 -> msg-2-result must exist");
+
+        // Semantic link: tool-a -> msg-2-result
+        assert!(traj.edges.iter().any(|e| e.from == "tool-a" && e.to == "msg-2-result"),
+            "semantic edge tool-a -> msg-2-result must exist");
+    }
+
+    #[test]
+    fn test_flatten_absorbs_single_block_user_message() {
+        let mut traj = Trajectory::new("sess");
+        let user_msg = Message::new("msg-1", Role::user())
+            .with_parent("msg-0")
+            .with_block(Block::new("msg-1", "user", Content::Text("hello".into())));
+
+        traj.add_message(user_msg);
+        traj.flatten();
+
+        // Should be absorbed: only one node with id = msg-1
+        assert_eq!(traj.nodes.len(), 1, "single-block user message should be absorbed into one node");
+        assert_eq!(traj.nodes[0].id, "msg-1");
+        assert_eq!(traj.nodes[0].kind, "user");
+    }
+
+    #[test]
+    fn test_flatten_does_not_absorb_tool_result_with_call_id() {
+        let mut traj = Trajectory::new("sess");
+        let user_msg = Message::new("msg-1", Role::user())
+            .with_parent("msg-0")
+            .with_block(Block::new("msg-1-result", "tool_result", Content::ToolResult {
+                output: "done".into(),
+                is_error: false,
+            }).with_tool_call_id("tool-a"));
+
+        traj.add_message(user_msg);
+        traj.flatten();
+
+        // Should NOT be absorbed: envelope + block = 2 nodes
+        assert_eq!(traj.nodes.len(), 2, "tool_result with call_id must not be absorbed");
+        assert!(traj.nodes.iter().any(|n| n.id == "msg-1" && n.kind == "user"));
+        assert!(traj.nodes.iter().any(|n| n.id == "msg-1-result" && n.kind == "tool_result"));
     }
 }
