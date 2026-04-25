@@ -30,3 +30,7 @@ export async function listJsonlFiles(folder: string): Promise<string[]> {
 export async function loadTrajectory(path: string): Promise<Trajectory> {
   return invoke<Trajectory>("load_trajectory", { path });
 }
+
+export async function readFileText(path: string): Promise<string> {
+  return invoke<string>("read_file_text", { path });
+}

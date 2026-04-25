@@ -8,6 +8,11 @@ fn load_trajectory(path: String) -> Result<Trajectory, String> {
 }
 
 #[tauri::command]
+fn read_file_text(path: String) -> Result<String, String> {
+    std::fs::read_to_string(&path).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 fn list_jsonl_files(folder: String) -> Result<Vec<String>, String> {
     let path = Path::new(&folder);
     if !path.is_dir() {
@@ -36,7 +41,7 @@ fn list_jsonl_files(folder: String) -> Result<Vec<String>, String> {
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
-        .invoke_handler(tauri::generate_handler![load_trajectory, list_jsonl_files])
+        .invoke_handler(tauri::generate_handler![load_trajectory, list_jsonl_files, read_file_text])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

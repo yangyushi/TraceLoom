@@ -52,7 +52,7 @@ mod tests {
                 result.err()
             );
             let traj = result.unwrap();
-            assert!(!traj.nodes.is_empty(), "{} produced no nodes", path.display());
+            assert!(!traj.messages.is_empty(), "{} produced no messages", path.display());
         }
     }
 }

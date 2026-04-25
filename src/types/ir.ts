@@ -1,8 +1,6 @@
 export interface Trajectory {
   session_id: string;
   messages: Message[];
-  nodes: Node[];
-  edges: Edge[];
   orphans: string[];
   warnings: string[];
 }
@@ -14,6 +12,7 @@ export interface Message {
   timestamp: string | null;
   blocks: Block[];
   is_sidechain: boolean;
+  raw_json: string | null;
 }
 
 export interface Block {
@@ -23,26 +22,7 @@ export interface Block {
   tool_call_id: string | null;
 }
 
-export interface Node {
-  id: string;
-  parent_id: string | null;
-  message_id: string | null;
-  kind: string;
-  role: Role;
-  content: Content;
-  timestamp: string | null;
-  metadata: Record<string, unknown>;
-  is_sidechain: boolean;
-}
-
-export interface Role {
-  0: string;
-}
-
-export interface Edge {
-  from: string;
-  to: string;
-}
+export type Role = string;
 
 export type Content =
   | { type: "Empty" }

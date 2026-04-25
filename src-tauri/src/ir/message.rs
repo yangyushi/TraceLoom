@@ -1,7 +1,31 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-use super::{Content, Role};
+use super::Content;
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct Role(pub String);
+
+impl Role {
+    pub fn user() -> Self {
+        Role("user".into())
+    }
+    pub fn assistant() -> Self {
+        Role("assistant".into())
+    }
+    pub fn system() -> Self {
+        Role("system".into())
+    }
+    pub fn tool() -> Self {
+        Role("tool".into())
+    }
+}
+
+impl Default for Role {
+    fn default() -> Self {
+        Role("unknown".into())
+    }
+}
 
 /// Represents one JSONL line — a single message in the conversation.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -12,6 +36,7 @@ pub struct Message {
     pub timestamp: Option<DateTime<Utc>>,
     pub blocks: Vec<Block>,
     pub is_sidechain: bool,
+    pub raw_json: Option<String>,
 }
 
 impl Message {
@@ -23,6 +48,7 @@ impl Message {
             timestamp: None,
             blocks: Vec::new(),
             is_sidechain: false,
+            raw_json: None,
         }
     }
 
@@ -44,6 +70,15 @@ impl Message {
     pub fn with_sidechain(mut self) -> Self {
         self.is_sidechain = true;
         self
+    }
+
+    pub fn with_raw_json(mut self, raw: impl Into<String>) -> Self {
+        self.raw_json = Some(raw.into());
+        self
+    }
+
+    pub fn prune_empty_blocks(&mut self) {
+        self.blocks.retain(|b| !b.content.is_empty());
     }
 }
 

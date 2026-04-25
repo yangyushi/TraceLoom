@@ -2,18 +2,30 @@
   import { marked } from "marked";
   import * as Prism from "prismjs";
   import "prismjs/components/prism-json";
-  import type { Node } from "../types/ir";
+  import type { Message, Block } from "../types/ir";
+
+  interface MessageItem {
+    type: "message";
+    message: Message;
+  }
+
+  interface BlockItem {
+    type: "block";
+    message: Message;
+    block: Block;
+  }
 
   interface Props {
-    node: Node;
+    item: MessageItem | BlockItem | null;
     onClose: () => void;
   }
 
-  let { node, onClose }: Props = $props();
+  let { item, onClose }: Props = $props();
   let showMarkdown = $state(false);
+  let showItems = $state(false);
 
-  function getRawText(): string {
-    const c = node.content;
+  function getRawText(block: Block): string {
+    const c = block.content;
     switch (c.type) {
       case "Text":
         return c.data;
@@ -34,10 +46,8 @@
 
   /**
    * Try to extract a JSON object or array from anywhere inside the text.
-   * Handles cases where JSON is embedded after a prefix (e.g. ToolUse names).
    */
   function findJsonInText(text: string): string | null {
-    // Look for the first '{' or '[' that could start JSON
     let braceIdx = text.indexOf("{");
     let bracketIdx = text.indexOf("[");
     let start = -1;
@@ -50,7 +60,6 @@
     }
     if (start < 0) return null;
 
-    // Try expanding the substring until it parses as valid JSON
     for (let end = start + 2; end <= text.length; end++) {
       const candidate = text.slice(start, end);
       try {
@@ -64,12 +73,10 @@
   }
 
   function highlightJson(text: string): string {
-    // First try: the whole text is JSON
     try {
       JSON.parse(text);
       return Prism.highlight(text, Prism.languages.json, "json");
     } catch {
-      // Second try: JSON is embedded somewhere in the text
       const jsonBlock = findJsonInText(text);
       if (jsonBlock) {
         const before = escapeHtml(text.slice(0, text.indexOf(jsonBlock)));
@@ -95,7 +102,6 @@
   }
 
   function parseSections(raw: string): Section[] {
-    // First try: the whole text is a JSON object with top-level keys
     try {
       const parsed = JSON.parse(raw);
       if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
@@ -111,7 +117,6 @@
       // Not pure JSON object
     }
 
-    // Second try: JSON is embedded in the text
     const jsonBlock = findJsonInText(raw);
     if (jsonBlock) {
       try {
@@ -141,63 +146,136 @@
     }
   }
 
-  const sections = $derived(parseSections(getRawText()));
-
   function formatTimestamp(ts: string | null): string {
     if (!ts) return "N/A";
     return new Date(ts).toLocaleString();
   }
+
+  function prettyPrintJson(raw: string): string {
+    try {
+      const parsed = JSON.parse(raw);
+      return JSON.stringify(parsed, null, 2);
+    } catch {
+      return raw;
+    }
+  }
+
+  interface KvItem {
+    key: string;
+    value: string;
+    isJson: boolean;
+  }
+
+  function parseObjectItems(raw: string): KvItem[] {
+    try {
+      const parsed = JSON.parse(raw);
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+        const items: KvItem[] = [];
+        for (const [key, val] of Object.entries(parsed)) {
+          if (typeof val === "string") {
+            items.push({ key, value: val, isJson: false });
+          } else {
+            items.push({ key, value: JSON.stringify(val, null, 2), isJson: true });
+          }
+        }
+        return items;
+      }
+    } catch {
+      // fall through
+    }
+    return [{ key: "Content", value: raw, isJson: false }];
+  }
 </script>
 
 <div class="detail-panel">
-  <div class="detail-header">
-    <h3>{node.kind}</h3>
-    <button class="close-btn" onclick={onClose}>&times;</button>
-  </div>
-
-  <div class="detail-meta">
-    <div><strong>ID:</strong> {node.id}</div>
-    <div><strong>Role:</strong> {node.role[0]}</div>
-    {#if node.parent_id}
-      <div><strong>Parent:</strong> {node.parent_id}</div>
-    {/if}
-    <div><strong>Time:</strong> {formatTimestamp(node.timestamp)}</div>
-    {#if node.is_sidechain}
-      <div class="badge">sidechain</div>
-    {/if}
-  </div>
-
-  <div class="detail-content">
-    <div class="content-toolbar">
-      <button class:active={!showMarkdown} onclick={() => (showMarkdown = false)}>Raw</button>
-      <button class:active={showMarkdown} onclick={() => (showMarkdown = true)}>Markdown</button>
+  {#if item && item.type === "message"}
+    {@const msg = item.message}
+    <div class="detail-header">
+      <h3>{msg.role}</h3>
+      <button class="close-btn" onclick={onClose}>&times;</button>
     </div>
 
-    {#if showMarkdown}
-      <div class="markdown-sections">
-        {#each sections as section}
-          <details class="markdown-section" open={false}>
-            <summary class="section-title">{section.key}</summary>
-            <div class="markdown-body">
-              {#if section.isMarkdown}
-                {@html renderMarkdown(section.value)}
-              {:else}
-                <pre class="json-block">{@html highlightJson(section.value)}</pre>
-              {/if}
-            </div>
-          </details>
-        {/each}
-      </div>
-    {:else}
-      <pre class="raw-body">{@html highlightJson(getRawText())}</pre>
-    {/if}
-  </div>
+    <div class="detail-meta">
+      <div><strong>ID:</strong> {msg.id}</div>
+      <div><strong>Role:</strong> {msg.role}</div>
+      {#if msg.parent_id}
+        <div><strong>Parent:</strong> {msg.parent_id}</div>
+      {/if}
+      <div><strong>Time:</strong> {formatTimestamp(msg.timestamp)}</div>
+      <div><strong>Blocks:</strong> {msg.blocks.length}</div>
+      {#if msg.is_sidechain}
+        <div class="badge">sidechain</div>
+      {/if}
+    </div>
 
-  {#if Object.keys(node.metadata).length > 0}
-    <details class="metadata">
-      <summary>Metadata</summary>
-      <pre>{@html highlightJson(JSON.stringify(node.metadata, null, 2))}</pre>
-    </details>
+    {#if msg.raw_json}
+      <div class="detail-content">
+        <div class="content-toolbar">
+          <button class:active={!showItems} onclick={() => (showItems = false)}>json</button>
+          <button class:active={showItems} onclick={() => (showItems = true)}>items</button>
+        </div>
+        {#if showItems}
+          <div class="item-sections">
+            {#each parseObjectItems(msg.raw_json) as item}
+              <details class="item-section" open>
+                <summary class="item-title">{item.key}</summary>
+                <div class="item-body">
+                  {#if item.isJson}
+                    <pre class="json-block">{@html highlightJson(item.value)}</pre>
+                  {:else}
+                    <div class="markdown-body">{@html renderMarkdown(item.value)}</div>
+                  {/if}
+                </div>
+              </details>
+            {/each}
+          </div>
+        {:else}
+          <pre class="raw-body">{@html highlightJson(prettyPrintJson(msg.raw_json))}</pre>
+        {/if}
+      </div>
+    {/if}
+  {:else if item && item.type === "block"}
+    {@const block = item.block}
+    {@const msg = item.message}
+    <div class="detail-header">
+      <h3>{block.kind}</h3>
+      <button class="close-btn" onclick={onClose}>&times;</button>
+    </div>
+
+    <div class="detail-meta">
+      <div><strong>ID:</strong> {block.id}</div>
+      <div><strong>Kind:</strong> {block.kind}</div>
+      <div><strong>Message:</strong> {msg.role} ({msg.id})</div>
+      {#if block.tool_call_id}
+        <div><strong>Tool Call ID:</strong> {block.tool_call_id}</div>
+      {/if}
+    </div>
+
+    <div class="detail-content">
+      <div class="content-toolbar">
+        <button class:active={!showMarkdown} onclick={() => (showMarkdown = false)}>Raw</button>
+        <button class:active={showMarkdown} onclick={() => (showMarkdown = true)}>Markdown</button>
+      </div>
+
+      {#if showMarkdown}
+        <div class="markdown-sections">
+          {#each parseSections(getRawText(block)) as section}
+            <details class="markdown-section" open>
+              <summary class="section-title">{section.key}</summary>
+              <div class="markdown-body">
+                {#if section.isMarkdown}
+                  {@html renderMarkdown(section.value)}
+                {:else}
+                  <pre class="json-block">{@html highlightJson(section.value)}</pre>
+                {/if}
+              </div>
+            </details>
+          {/each}
+        </div>
+      {:else}
+        <pre class="raw-body">{@html highlightJson(getRawText(block))}</pre>
+      {/if}
+    </div>
   {/if}
 </div>
 
@@ -397,26 +475,57 @@
     color: #24292e;
   }
 
-  .metadata {
-    margin-top: 16px;
-    font-size: 12px;
-    color: #868e96;
+  .item-sections {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
   }
 
-  .metadata summary {
-    cursor: pointer;
-    color: #495057;
-    font-weight: 500;
-  }
-
-  .metadata pre {
+  .item-section {
     background: #f8f9fa;
     border: 1px solid #e9ecef;
-    border-radius: 4px;
-    padding: 8px;
+    border-radius: 6px;
+    overflow: hidden;
+  }
+
+  .item-title {
+    padding: 8px 12px;
+    font-size: 12px;
+    font-weight: 600;
+    color: #495057;
+    text-transform: uppercase;
+    letter-spacing: 0.3px;
+    cursor: pointer;
+    background: #f1f3f5;
+    user-select: none;
+  }
+
+  .item-body {
+    padding: 12px;
+    font-size: 13px;
+    line-height: 1.6;
+    color: #343a40;
+    max-height: 50vh;
     overflow: auto;
-    max-height: 200px;
-    font-size: 11px;
+  }
+
+  .item-body :global(p) {
+    margin: 0 0 10px;
+  }
+
+  .item-body :global(code) {
+    background: #e9ecef;
+    padding: 2px 4px;
+    border-radius: 3px;
     font-family: ui-monospace, monospace;
+    font-size: 12px;
+  }
+
+  .item-body :global(pre) {
+    background: #f1f3f5;
+    padding: 10px;
+    border-radius: 4px;
+    overflow: auto;
+    font-size: 12px;
   }
 </style>

@@ -33,6 +33,28 @@ impl Default for Content {
     }
 }
 
+impl Content {
+    pub fn is_empty(&self) -> bool {
+        match self {
+            Content::Empty => true,
+            Content::Text(s) => s.trim().is_empty(),
+            Content::Thinking { text, encrypted } => text.trim().is_empty() && !*encrypted,
+            Content::ToolResult { output, .. } => output.trim().is_empty(),
+            Content::Snapshot { description, file_path } => {
+                description.trim().is_empty() && file_path.is_none()
+            }
+            Content::Custom { payload, .. } => {
+                payload.is_null()
+                    || payload
+                        .as_object()
+                        .map(|o| o.is_empty())
+                        .unwrap_or(false)
+            }
+            Content::ToolUse { .. } => false,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

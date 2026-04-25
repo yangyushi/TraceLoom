@@ -1,12 +1,12 @@
 <script lang="ts">
-  import { pickFolder, listJsonlFiles, loadTrajectory, pickAndLoadTrajectory } from "./lib/api";
-  import type { Trajectory, Node } from "./types/ir";
+  import { pickFolder, listJsonlFiles, loadTrajectory, pickAndLoadTrajectory, readFileText } from "./lib/api";
+  import type { Trajectory, Message, Block } from "./types/ir";
   import DotsRenderer from "./components/DotsRenderer.svelte";
   import BricksRenderer from "./components/BricksRenderer.svelte";
   import NodeDetail from "./components/NodeDetail.svelte";
 
   let trajectory = $state<Trajectory | null>(null);
-  let selectedNode = $state<Node | null>(null);
+  let selectedId = $state<string | null>(null);
   let theme = $state<"dots" | "bricks">("dots");
   let error = $state<string | null>(null);
 
@@ -18,6 +18,9 @@
   let rightWidth = $state(420);
   let isResizingLeft = $state(false);
   let isResizingRight = $state(false);
+
+  // Context menu state
+  let contextMenu = $state<{ x: number; y: number; file: string } | null>(null);
 
   async function handleOpenFolder() {
     error = null;
@@ -31,7 +34,7 @@
       } else {
         trajectory = null;
         currentFile = null;
-        selectedNode = null;
+        selectedId = null;
       }
     } catch (e) {
       error = String(e);
@@ -44,7 +47,7 @@
       const result = await pickAndLoadTrajectory();
       if (result) {
         trajectory = result;
-        selectedNode = null;
+        selectedId = null;
         currentFile = null;
         folderPath = null;
         files = [];
@@ -60,18 +63,72 @@
       const result = await loadTrajectory(path);
       trajectory = result;
       currentFile = path;
-      selectedNode = null;
+      selectedId = null;
     } catch (e) {
       error = String(e);
     }
   }
 
-  function handleSelect(node: Node) {
-    selectedNode = node;
+  function handleSelect(id: string) {
+    selectedId = id;
   }
 
   function fileName(path: string): string {
     return path.split(/[/\\]/).pop() ?? path;
+  }
+
+  function handleContextMenu(e: MouseEvent, path: string) {
+    e.preventDefault();
+    contextMenu = { x: e.clientX, y: e.clientY, file: path };
+  }
+
+  function closeContextMenu() {
+    contextMenu = null;
+  }
+
+  async function copyToClipboard(text: string) {
+    try {
+      await navigator.clipboard.writeText(text);
+    } catch {
+      // Fallback for older browsers
+      const textarea = document.createElement("textarea");
+      textarea.value = text;
+      document.body.appendChild(textarea);
+      textarea.select();
+      document.execCommand("copy");
+      document.body.removeChild(textarea);
+    }
+    closeContextMenu();
+  }
+
+  async function copyFileContent(path: string) {
+    try {
+      const text = await readFileText(path);
+      await copyToClipboard(text);
+    } catch (e) {
+      error = String(e);
+      closeContextMenu();
+    }
+  }
+
+  const selectedItem = $derived.by(() => {
+    if (!trajectory || !selectedId) return null;
+    const msg = trajectory.messages.find((m) => m.id === selectedId);
+    if (msg) return { type: "message" as const, message: msg };
+    for (const m of trajectory.messages) {
+      const block = m.blocks.find((b) => b.id === selectedId);
+      if (block) return { type: "block" as const, message: m, block };
+    }
+    return null;
+  });
+
+  function onWindowClick(e: MouseEvent) {
+    if (contextMenu) {
+      const target = e.target as HTMLElement;
+      if (!target.closest(".context-menu")) {
+        closeContextMenu();
+      }
+    }
   }
 
   function startResizeLeft(e: MouseEvent) {
@@ -121,7 +178,7 @@
       <button class:active={theme === "bricks"} onclick={() => (theme = "bricks")}>Bricks</button>
     </div>
     {#if trajectory}
-      <span class="meta">{trajectory.nodes.length} nodes</span>
+      <span class="meta">{trajectory.messages.length} messages</span>
     {/if}
   </header>
 
@@ -139,6 +196,7 @@
               class="file-item"
               class:active={currentFile === path}
               onclick={() => loadFile(path)}
+              oncontextmenu={(e) => handleContextMenu(e, path)}
             >
               {fileName(path)}
             </button>
@@ -151,22 +209,39 @@
     <div class="canvas">
       {#if trajectory}
         {#if theme === "dots"}
-          <DotsRenderer {trajectory} onSelect={handleSelect} {selectedNode} />
+          <DotsRenderer {trajectory} onSelect={handleSelect} {selectedId} />
         {:else}
-          <BricksRenderer {trajectory} onSelect={handleSelect} {selectedNode} />
+          <BricksRenderer {trajectory} onSelect={handleSelect} {selectedId} />
         {/if}
       {:else}
         <div class="placeholder">Open a folder or file to visualize</div>
       {/if}
     </div>
 
-    {#if selectedNode}
+    {#if selectedItem}
       <div class="resize-handle" onmousedown={startResizeRight} role="separator" tabindex="-1" aria-label="Resize inspector"></div>
       <aside class="inspector" style="width: {rightWidth}px;">
-        <NodeDetail node={selectedNode} onClose={() => (selectedNode = null)} />
+        <NodeDetail item={selectedItem} onClose={() => (selectedId = null)} />
       </aside>
     {/if}
   </div>
+
+  {#if contextMenu}
+    <div
+      class="context-menu-overlay"
+      onclick={closeContextMenu}
+      oncontextmenu={(e) => { e.preventDefault(); closeContextMenu(); }}
+      role="presentation"
+    ></div>
+    <div
+      class="context-menu"
+      style="left: {contextMenu.x}px; top: {contextMenu.y}px;"
+    >
+      <button onclick={() => copyToClipboard(fileName(contextMenu!.file))}>Copy filename</button>
+      <button onclick={() => copyToClipboard(contextMenu!.file)}>Copy path</button>
+      <button onclick={() => copyFileContent(contextMenu!.file)}>Copy jsonl content</button>
+    </div>
+  {/if}
 </main>
 
 <style>
@@ -354,5 +429,39 @@
     background: #ffffff;
     overflow: auto;
     flex-shrink: 0;
+  }
+
+  .context-menu-overlay {
+    position: fixed;
+    inset: 0;
+    z-index: 9998;
+  }
+
+  .context-menu {
+    position: fixed;
+    z-index: 9999;
+    background: #ffffff;
+    border: 1px solid #dee2e6;
+    border-radius: 6px;
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+    display: flex;
+    flex-direction: column;
+    min-width: 160px;
+    padding: 4px;
+  }
+
+  .context-menu button {
+    background: none;
+    border: none;
+    padding: 8px 12px;
+    text-align: left;
+    font-size: 13px;
+    color: #212529;
+    cursor: pointer;
+    border-radius: 4px;
+  }
+
+  .context-menu button:hover {
+    background: #f1f3f5;
   }
 </style>

@@ -27,14 +27,15 @@ pub fn parse(contents: &str) -> Result<Trajectory, ParseError> {
         let record_type = value.get("type").and_then(|t| t.as_str());
         let timestamp = parse_timestamp(value.get("timestamp"));
 
-        let message = match record_type {
+        let mut message = match record_type {
             Some("session") => continue,
-            Some("model_change") | Some("thinking_level_change") => parse_meta_event(&value, timestamp)?,
-            Some("custom") => parse_custom_event(&value, timestamp)?,
-            Some("message") => parse_message(&value, timestamp)?,
+            Some("model_change") | Some("thinking_level_change") => parse_meta_event(line, &value, timestamp)?,
+            Some("custom") => parse_custom_event(line, &value, timestamp)?,
+            Some("message") => parse_message(line, &value, timestamp)?,
             _ => continue,
         };
 
+        message.prune_empty_blocks();
         trajectory.add_message(message);
     }
 
@@ -42,18 +43,17 @@ pub fn parse(contents: &str) -> Result<Trajectory, ParseError> {
         trajectory.session_id = sid;
     }
 
-    trajectory.flatten();
     Ok(trajectory)
 }
 
-fn parse_message(value: &Value, timestamp: Option<DateTime<Utc>>) -> Result<Message, ParseError> {
+fn parse_message(raw_line: &str, value: &Value, timestamp: Option<DateTime<Utc>>) -> Result<Message, ParseError> {
     let id = value["id"].as_str().unwrap_or("unknown").to_string();
     let parent_id = value["parentId"].as_str().map(|s| s.to_string());
 
     let message = &value["message"];
     let role = message["role"].as_str().unwrap_or("user");
 
-    let mut msg = Message::new(&id, Role(role.to_string()));
+    let mut msg = Message::new(&id, Role(role.to_string())).with_raw_json(raw_line);
     if let Some(pid) = parent_id {
         msg = msg.with_parent(pid);
     }
@@ -125,19 +125,19 @@ fn parse_message(value: &Value, timestamp: Option<DateTime<Utc>>) -> Result<Mess
     }
 
     if msg.blocks.is_empty() {
-        let blk = Block::new(&id, role, Content::Empty);
+        let blk = Block::new(&format!("{}-block", id), role, Content::Empty);
         msg = msg.with_block(blk);
     }
 
     Ok(msg)
 }
 
-fn parse_meta_event(value: &Value, timestamp: Option<DateTime<Utc>>) -> Result<Message, ParseError> {
+fn parse_meta_event(raw_line: &str, value: &Value, timestamp: Option<DateTime<Utc>>) -> Result<Message, ParseError> {
     let id = value["id"].as_str().unwrap_or("unknown").to_string();
     let parent_id = value["parentId"].as_str().map(|s| s.to_string());
     let kind = value["type"].as_str().unwrap_or("meta");
 
-    let mut msg = Message::new(&id, Role::system());
+    let mut msg = Message::new(&id, Role::system()).with_raw_json(raw_line);
     if let Some(pid) = parent_id {
         msg = msg.with_parent(pid);
     }
@@ -146,7 +146,7 @@ fn parse_meta_event(value: &Value, timestamp: Option<DateTime<Utc>>) -> Result<M
     }
 
     let blk = Block::new(
-        &id,
+        &format!("{}-block", id),
         kind,
         Content::Custom {
             kind: kind.into(),
@@ -157,12 +157,12 @@ fn parse_meta_event(value: &Value, timestamp: Option<DateTime<Utc>>) -> Result<M
     Ok(msg)
 }
 
-fn parse_custom_event(value: &Value, timestamp: Option<DateTime<Utc>>) -> Result<Message, ParseError> {
+fn parse_custom_event(raw_line: &str, value: &Value, timestamp: Option<DateTime<Utc>>) -> Result<Message, ParseError> {
     let id = value["id"].as_str().unwrap_or("unknown").to_string();
     let parent_id = value["parentId"].as_str().map(|s| s.to_string());
     let custom_type = value["customType"].as_str().unwrap_or("custom");
 
-    let mut msg = Message::new(&id, Role::system());
+    let mut msg = Message::new(&id, Role::system()).with_raw_json(raw_line);
     if let Some(pid) = parent_id {
         msg = msg.with_parent(pid);
     }
@@ -171,7 +171,7 @@ fn parse_custom_event(value: &Value, timestamp: Option<DateTime<Utc>>) -> Result
     }
 
     let blk = Block::new(
-        &id,
+        &format!("{}-block", id),
         "custom",
         Content::Custom {
             kind: custom_type.into(),
@@ -204,29 +204,26 @@ mod tests {
         )
         .unwrap();
         let traj = parse(&contents).unwrap();
-        assert!(!traj.nodes.is_empty());
-        assert!(traj.nodes.iter().any(|n| n.kind == "user"));
-        assert!(traj.nodes.iter().any(|n| n.kind == "tool_call"));
-        assert!(traj.nodes.iter().any(|n| n.kind == "tool_result"));
+        assert!(!traj.messages.is_empty());
+        assert!(traj.messages.iter().any(|m| m.blocks.iter().any(|b| b.kind == "user")));
+        assert!(traj.messages.iter().any(|m| m.blocks.iter().any(|b| b.kind == "tool_call")));
+        assert!(traj.messages.iter().any(|m| m.blocks.iter().any(|b| b.kind == "tool_result")));
     }
 
     #[test]
     fn test_tool_call_not_lost_when_followed_by_text() {
-        let jsonl = r#"{"type":"message","id":"msg-1","parentId":"msg-0","timestamp":"2026-01-01T00:00:00Z","message":{"role":"assistant","content":[{"type":"toolCall","id":"tool-1","name":"Read","arguments":{}},{"type":"text","text":"  "}]}}"#;
+        let jsonl = r#"{"type":"message","id":"msg-1","parentId":"msg-0","timestamp":"2026-01-01T00:00:00Z","message":{"role":"assistant","content":[{"type":"toolCall","id":"tool-1","name":"Read","arguments":{}},{"type":"text","text":"ok"}]}}"#;
         let traj = parse(jsonl).unwrap();
-        let tool_calls: Vec<_> = traj.nodes.iter().filter(|n| n.kind == "tool_call").collect();
+        let msg = traj.messages.iter().find(|m| m.id == "msg-1").expect("msg-1");
+        let tool_calls: Vec<_> = msg.blocks.iter().filter(|b| b.kind == "tool_call").collect();
         assert_eq!(
             tool_calls.len(),
             1,
-            "expected 1 tool_call node, got {}",
+            "expected 1 tool_call block, got {}",
             tool_calls.len()
         );
-        assert!(traj.nodes.iter().any(|n| n.kind == "text"), "text node was dropped");
-        // Tool call and text should be children of envelope
-        assert!(
-            traj.edges.iter().any(|e| e.from == "msg-1" && e.to == "tool-1"),
-            "edge msg-1 -> tool-1 missing"
-        );
+        assert!(msg.blocks.iter().any(|b| b.kind == "text"), "text block was dropped");
+        assert!(msg.blocks.iter().any(|b| b.id == "tool-1"), "tool-1 block missing");
     }
 
     #[test]
@@ -234,25 +231,16 @@ mod tests {
         let jsonl = r#"{"type":"message","id":"msg-1","parentId":"msg-0","timestamp":"2026-01-01T00:00:00Z","message":{"role":"assistant","content":[{"type":"toolCall","id":"tool-1","name":"Read","arguments":{}}]}}
 {"type":"message","id":"msg-2","parentId":"msg-1","timestamp":"2026-01-01T00:00:01Z","message":{"role":"toolResult","toolCallId":"tool-1","toolName":"Read","content":[{"type":"text","text":"done"}],"isError":false}}"#;
         let traj = parse(jsonl).unwrap();
-        let tool_call = traj
-            .nodes
-            .iter()
-            .find(|n| n.kind == "tool_call")
-            .expect("tool_call node");
+        let assistant_msg = traj.messages.iter().find(|m| m.id == "msg-1").expect("msg-1");
+        let tool_call = assistant_msg.blocks.iter().find(|b| b.kind == "tool_call").expect("tool_call block");
         assert_eq!(tool_call.id, "tool-1", "tool_call must use block id");
-        let tool_result = traj
-            .nodes
-            .iter()
-            .find(|n| n.kind == "tool_result")
-            .expect("tool_result node");
+
+        let tool_result_msg = traj.messages.iter().find(|m| m.id == "msg-2").expect("msg-2");
+        let tool_result = tool_result_msg.blocks.iter().find(|b| b.kind == "tool_result").expect("tool_result block");
         assert_eq!(
-            tool_result.parent_id,
+            tool_result.tool_call_id,
             Some("tool-1".to_string()),
             "tool_result must link to tool_call via toolCallId"
-        );
-        assert!(
-            traj.edges.iter().any(|e| e.from == "tool-1" && e.to == tool_result.id),
-            "edge tool_call -> tool_result must exist"
         );
     }
 
@@ -263,38 +251,30 @@ mod tests {
 {"type":"message","id":"msg-3","parentId":"msg-2","timestamp":"2026-01-01T00:00:02Z","message":{"role":"assistant","content":[{"type":"text","text":"thanks"}]}}"#;
         let traj = parse(jsonl).unwrap();
 
-        // Envelope for toolResult message must exist so msg-3 can find its parent
+        // Message msg-2 must exist so msg-3 can find its parent
         assert!(
-            traj.nodes.iter().any(|n| n.id == "msg-2"),
-            "envelope node msg-2 must exist for parent chain"
+            traj.messages.iter().any(|m| m.id == "msg-2"),
+            "message msg-2 must exist for parent chain"
         );
 
         // Conversation chain must be intact
-        assert!(
-            traj.edges.iter().any(|e| e.from == "msg-1" && e.to == "msg-2"),
-            "conversation edge msg-1 -> msg-2 missing"
-        );
-        assert!(
-            traj.edges.iter().any(|e| e.from == "msg-2" && e.to == "msg-3"),
-            "conversation edge msg-2 -> msg-3 missing"
-        );
+        let msg2 = traj.messages.iter().find(|m| m.id == "msg-2").expect("msg-2");
+        assert_eq!(msg2.parent_id, Some("msg-1".to_string()), "msg-2 parent must be msg-1");
+        let msg3 = traj.messages.iter().find(|m| m.id == "msg-3").expect("msg-3");
+        assert_eq!(msg3.parent_id, Some("msg-2".to_string()), "msg-3 parent must be msg-2");
 
-        // Tool result block must have containment edge from its message envelope
-        let tool_result = traj.nodes.iter().find(|n| n.kind == "tool_result").expect("tool_result node");
-        assert!(
-            traj.edges.iter().any(|e| e.from == "msg-2" && e.to == tool_result.id),
-            "containment edge msg-2 -> tool_result missing"
-        );
+        // Tool result block must exist in msg-2
+        let tool_result = msg2.blocks.iter().find(|b| b.kind == "tool_result").expect("tool_result block");
+        assert_eq!(tool_result.tool_call_id, Some("tool-1".to_string()));
     }
 
     #[test]
-    fn test_missing_tool_call_id_does_not_create_empty_edge() {
+    fn test_missing_tool_call_id_does_not_create_empty_tool_call_id() {
         let jsonl = r#"{"type":"message","id":"msg-1","parentId":"msg-0","timestamp":"2026-01-01T00:00:00Z","message":{"role":"toolResult","toolName":"Read","content":[{"type":"text","text":"done"}],"isError":false}}"#;
         let traj = parse(jsonl).unwrap();
-        // No edge from "" should be created
-        assert!(
-            !traj.edges.iter().any(|e| e.from.is_empty()),
-            "must not create edge from empty string when toolCallId is missing"
-        );
+        let msg = traj.messages.iter().find(|m| m.id == "msg-1").expect("msg-1");
+        let tool_result = msg.blocks.iter().find(|b| b.kind == "tool_result").expect("tool_result block");
+        assert!(tool_result.tool_call_id.is_none() || tool_result.tool_call_id.as_ref().unwrap().is_empty(),
+            "must not set tool_call_id when toolCallId is missing");
     }
 }

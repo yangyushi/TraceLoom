@@ -1,35 +1,21 @@
 <script lang="ts">
-  import type { Trajectory, Node, Message, Block } from "../types/ir";
+  import type { Trajectory, Message, Block } from "../types/ir";
   import { getStrokeColor } from "../lib/colors";
 
   interface Props {
     trajectory: Trajectory;
-    onSelect: (node: Node) => void;
-    selectedNode: Node | null;
+    onSelect: (id: string) => void;
+    selectedId: string | null;
   }
 
-  let { trajectory, onSelect, selectedNode }: Props = $props();
-
-  const nodeById = $derived(
-    new Map(trajectory.nodes.map((n) => [n.id, n]))
-  );
-
-  function handleSelectMessage(msg: Message) {
-    const node = nodeById.get(msg.id);
-    if (node) onSelect(node);
-  }
-
-  function handleSelectBlock(block: Block) {
-    const node = nodeById.get(block.id);
-    if (node) onSelect(node);
-  }
+  let { trajectory, onSelect, selectedId }: Props = $props();
 
   function isMessageSelected(msg: Message): boolean {
-    return selectedNode?.id === msg.id;
+    return selectedId === msg.id;
   }
 
   function isBlockSelected(block: Block): boolean {
-    return selectedNode?.id === block.id;
+    return selectedId === block.id;
   }
 
   function formatTimestamp(ts: string | null): string {
@@ -55,7 +41,41 @@
         return `[${(content as { type: string }).type}]`;
     }
   }
+
+  function getNavigationTarget(key: string): string | null {
+    if (!selectedId || key === "ArrowLeft" || key === "ArrowRight") return null;
+
+    const ids: string[] = [];
+    for (const msg of trajectory.messages) {
+      ids.push(msg.id);
+      for (const block of msg.blocks) {
+        ids.push(block.id);
+      }
+    }
+
+    const idx = ids.indexOf(selectedId);
+    if (idx < 0) return null;
+
+    if (key === "ArrowUp") return ids[idx - 1] ?? null;
+    if (key === "ArrowDown") return ids[idx + 1] ?? null;
+    return null;
+  }
+
+  function handleKeydown(e: KeyboardEvent) {
+    if (!["ArrowUp", "ArrowDown"].includes(e.key)) return;
+    const target = e.target as HTMLElement;
+    if (target.tagName === "INPUT" || target.tagName === "TEXTAREA" || target.isContentEditable) {
+      return;
+    }
+    e.preventDefault();
+    const nextId = getNavigationTarget(e.key);
+    if (nextId) {
+      onSelect(nextId);
+    }
+  }
 </script>
+
+<svelte:window onkeydown={handleKeydown} />
 
 <div class="bricks-container">
   {#each trajectory.messages as msg}
@@ -63,14 +83,14 @@
       class="brick message-brick"
       class:selected={isMessageSelected(msg)}
       class:sidechain={msg.is_sidechain}
-      style="border-left-color: {getStrokeColor(msg.role[0])};"
-      onclick={() => handleSelectMessage(msg)}
+      style="border-left-color: {getStrokeColor(msg.role)};"
+      onclick={() => onSelect(msg.id)}
       role="button"
       tabindex="0"
-      onkeydown={(e) => e.key === "Enter" && handleSelectMessage(msg)}
+      onkeydown={(e) => e.key === "Enter" && onSelect(msg.id)}
     >
       <div class="brick-header">
-        <span class="kind">{msg.role[0]}</span>
+        <span class="kind">{msg.role}</span>
         {#if msg.timestamp}
           <span class="time">{formatTimestamp(msg.timestamp)}</span>
         {/if}
@@ -86,10 +106,10 @@
         class:selected={isBlockSelected(block)}
         class:sidechain={msg.is_sidechain}
         style="border-left-color: {getStrokeColor(block.kind)}; margin-left: 24px;"
-        onclick={() => handleSelectBlock(block)}
+        onclick={() => onSelect(block.id)}
         role="button"
         tabindex="0"
-        onkeydown={(e) => e.key === "Enter" && handleSelectBlock(block)}
+        onkeydown={(e) => e.key === "Enter" && onSelect(block.id)}
       >
         <div class="brick-header">
           <span class="kind">{block.kind}</span>

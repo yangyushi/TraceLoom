@@ -19,13 +19,15 @@ pub fn parse(contents: &str) -> Result<Trajectory, ParseError> {
             session_id = Some(sid.to_string());
         }
 
-        let message = match value.get("type").and_then(|t| t.as_str()) {
-            Some("user") => parse_user_message(&value)?,
-            Some("assistant") => parse_assistant_message(&value)?,
-            Some("file-history-snapshot") => parse_snapshot(&value)?,
+        let mut message = match value.get("type").and_then(|t| t.as_str()) {
+            Some("user") => parse_user_message(line, &value)?,
+            Some("assistant") => parse_assistant_message(line, &value)?,
+            Some("file-history-snapshot") => parse_snapshot(line, &value)?,
             Some("last-prompt") => continue, // skip meta marker
             _ => continue,
         };
+
+        message.prune_empty_blocks();
 
         if let Some(ref sid) = session_id {
             trajectory.session_id.clone_from(sid);
@@ -34,11 +36,10 @@ pub fn parse(contents: &str) -> Result<Trajectory, ParseError> {
         trajectory.add_message(message);
     }
 
-    trajectory.flatten();
     Ok(trajectory)
 }
 
-fn parse_user_message(value: &Value) -> Result<Message, ParseError> {
+fn parse_user_message(raw_line: &str, value: &Value) -> Result<Message, ParseError> {
     let uuid = value["uuid"].as_str().unwrap_or("unknown").to_string();
     let parent_uuid = value["parentUuid"].as_str().map(|s| s.to_string());
     let timestamp = parse_timestamp(value.get("timestamp"));
@@ -47,7 +48,7 @@ fn parse_user_message(value: &Value) -> Result<Message, ParseError> {
     let message = &value["message"];
     let role = message["role"].as_str().unwrap_or("user");
 
-    let mut msg = Message::new(&uuid, Role(role.to_string()));
+    let mut msg = Message::new(&uuid, Role(role.to_string())).with_raw_json(raw_line);
     if let Some(pid) = parent_uuid {
         msg = msg.with_parent(pid);
     }
@@ -65,19 +66,15 @@ fn parse_user_message(value: &Value) -> Result<Message, ParseError> {
             if block["type"].as_str() == Some("tool_result") {
                 has_tool_results = true;
                 let tool_use_id = block["tool_use_id"].as_str();
-                let texts: Vec<String> = block
-                    .get("content")
-                    .and_then(|c| c.as_array())
-                    .map(|inner| {
-                        inner
-                            .iter()
-                            .filter_map(|c| {
-                                c.get("text").and_then(|t| t.as_str()).map(|s| s.to_string())
-                            })
-                            .collect()
-                    })
-                    .unwrap_or_default();
-                let output = texts.join("\n");
+                let output = match block.get("content") {
+                    Some(Value::String(s)) => s.clone(),
+                    Some(Value::Array(inner)) => inner
+                        .iter()
+                        .filter_map(|c| c.get("text").and_then(|t| t.as_str()).map(|s| s.to_string()))
+                        .collect::<Vec<_>>()
+                        .join("\n"),
+                    _ => String::new(),
+                };
                 let block_id = format!("{}-result-{}", uuid, idx);
                 let blk = Block::new(
                     &block_id,
@@ -117,12 +114,12 @@ fn parse_user_message(value: &Value) -> Result<Message, ParseError> {
         Content::Empty
     };
 
-    let blk = Block::new(&uuid, "user", content);
+    let blk = Block::new(&format!("{}-block", uuid), "user", content);
     msg = msg.with_block(blk);
     Ok(msg)
 }
 
-fn parse_assistant_message(value: &Value) -> Result<Message, ParseError> {
+fn parse_assistant_message(raw_line: &str, value: &Value) -> Result<Message, ParseError> {
     let uuid = value["uuid"].as_str().unwrap_or("unknown").to_string();
     let parent_uuid = value["parentUuid"].as_str().map(|s| s.to_string());
     let timestamp = parse_timestamp(value.get("timestamp"));
@@ -131,7 +128,7 @@ fn parse_assistant_message(value: &Value) -> Result<Message, ParseError> {
     let message = &value["message"];
     let role = message["role"].as_str().unwrap_or("assistant");
 
-    let mut msg = Message::new(&uuid, Role(role.to_string()));
+    let mut msg = Message::new(&uuid, Role(role.to_string())).with_raw_json(raw_line);
     if let Some(pid) = parent_uuid {
         msg = msg.with_parent(pid);
     }
@@ -151,13 +148,14 @@ fn parse_assistant_message(value: &Value) -> Result<Message, ParseError> {
             match block_type {
                 "thinking" => {
                     let text = block["thinking"].as_str().unwrap_or("").to_string();
+                    let has_signature = block.get("signature").is_some();
                     let block_id = format!("{}-think-{}", uuid, idx);
                     let blk = Block::new(
                         &block_id,
                         "think",
                         Content::Thinking {
                             text,
-                            encrypted: false,
+                            encrypted: has_signature,
                         },
                     );
                     msg = msg.with_block(blk);
@@ -193,14 +191,14 @@ fn parse_assistant_message(value: &Value) -> Result<Message, ParseError> {
     }
 
     if msg.blocks.is_empty() {
-        let blk = Block::new(&uuid, "null", Content::Empty);
+        let blk = Block::new(&format!("{}-block", uuid), "null", Content::Empty);
         msg = msg.with_block(blk);
     }
 
     Ok(msg)
 }
 
-fn parse_snapshot(value: &Value) -> Result<Message, ParseError> {
+fn parse_snapshot(raw_line: &str, value: &Value) -> Result<Message, ParseError> {
     let message_id = format!(
         "snapshot-{}",
         value["messageId"].as_str().unwrap_or("unknown")
@@ -218,13 +216,14 @@ fn parse_snapshot(value: &Value) -> Result<Message, ParseError> {
         }
     }
 
-    let mut msg = Message::new(&message_id, Role::system());
+    let mut msg = Message::new(&message_id, Role::system()).with_raw_json(raw_line);
     if let Some(pid) = parent_uuid {
         msg = msg.with_parent(pid);
     }
 
+    let block_id = format!("{}-block", message_id);
     let blk = Block::new(
-        &message_id,
+        &block_id,
         "snapshot",
         Content::Snapshot {
             file_path,
@@ -262,11 +261,11 @@ mod tests {
         )
         .unwrap();
         let traj = parse(&contents).unwrap();
-        assert!(!traj.nodes.is_empty());
-        assert!(traj.nodes.iter().any(|n| n.kind == "user"));
-        assert!(traj.nodes.iter().any(|n| n.kind == "think"));
-        assert!(traj.nodes.iter().any(|n| n.kind == "tool_call"));
-        assert!(traj.nodes.iter().any(|n| n.kind == "tool_result"));
+        assert!(!traj.messages.is_empty());
+        assert!(traj.messages.iter().any(|m| m.blocks.iter().any(|b| b.kind == "user")));
+        assert!(traj.messages.iter().any(|m| m.blocks.iter().any(|b| b.kind == "think")));
+        assert!(traj.messages.iter().any(|m| m.blocks.iter().any(|b| b.kind == "tool_call")));
+        assert!(traj.messages.iter().any(|m| m.blocks.iter().any(|b| b.kind == "tool_result")));
     }
 
     #[test]
@@ -280,46 +279,35 @@ mod tests {
         )
         .unwrap();
         let traj = parse(&contents).unwrap();
-        assert!(!traj.nodes.is_empty());
-        let sidechains: Vec<_> = traj.nodes.iter().filter(|n| n.is_sidechain).collect();
-        assert!(!sidechains.is_empty(), "expected sidechain nodes");
+        assert!(!traj.messages.is_empty());
+        let sidechains: Vec<_> = traj.messages.iter().filter(|m| m.is_sidechain).collect();
+        assert!(!sidechains.is_empty(), "expected sidechain messages");
     }
 
     #[test]
     fn test_multiple_content_blocks_not_collapsed() {
         let jsonl = r#"{"type":"assistant","uuid":"msg-1","parentUuid":"msg-0","timestamp":"2026-01-01T00:00:00Z","message":{"role":"assistant","content":[{"type":"thinking","thinking":"planning"},{"type":"text","text":"hello"}]}}"#;
         let traj = parse(jsonl).unwrap();
-        // Envelope + think block + text block = 3 nodes
-        assert_eq!(
-            traj.nodes.len(),
-            3,
-            "expected 3 nodes (envelope + thinking + text), got {}",
-            traj.nodes.len()
-        );
-        assert!(traj.nodes.iter().any(|n| n.kind == "think"), "think node missing");
-        assert!(traj.nodes.iter().any(|n| n.kind == "text"), "text node missing");
+        let msg = traj.messages.iter().find(|m| m.id == "msg-1").expect("msg-1");
+        assert_eq!(msg.blocks.len(), 2, "expected 2 blocks (thinking + text), got {}", msg.blocks.len());
+        assert!(msg.blocks.iter().any(|b| b.kind == "think"), "think block missing");
+        assert!(msg.blocks.iter().any(|b| b.kind == "text"), "text block missing");
     }
 
     #[test]
     fn test_parallel_tool_calls_preserved() {
         let jsonl = r#"{"type":"assistant","uuid":"msg-1","parentUuid":"msg-0","timestamp":"2026-01-01T00:00:00Z","message":{"role":"assistant","content":[{"type":"tool_use","id":"tool-a","name":"Read","input":{}},{"type":"tool_use","id":"tool-b","name":"Write","input":{}}]}}"#;
         let traj = parse(jsonl).unwrap();
-        let tool_calls: Vec<_> = traj.nodes.iter().filter(|n| n.kind == "tool_call").collect();
+        let msg = traj.messages.iter().find(|m| m.id == "msg-1").expect("msg-1");
+        let tool_calls: Vec<_> = msg.blocks.iter().filter(|b| b.kind == "tool_call").collect();
         assert_eq!(
             tool_calls.len(),
             2,
-            "expected 2 parallel tool_call nodes, got {}",
+            "expected 2 parallel tool_call blocks, got {}",
             tool_calls.len()
         );
-        // Tool calls should be children of the assistant envelope
-        assert!(
-            traj.edges.iter().any(|e| e.from == "msg-1" && e.to == "tool-a"),
-            "edge msg-1 -> tool-a missing"
-        );
-        assert!(
-            traj.edges.iter().any(|e| e.from == "msg-1" && e.to == "tool-b"),
-            "edge msg-1 -> tool-b missing"
-        );
+        assert!(msg.blocks.iter().any(|b| b.id == "tool-a"), "tool-a block missing");
+        assert!(msg.blocks.iter().any(|b| b.id == "tool-b"), "tool-b block missing");
     }
 
     #[test]
@@ -327,25 +315,16 @@ mod tests {
         let jsonl = r#"{"type":"assistant","uuid":"msg-1","parentUuid":"msg-0","timestamp":"2026-01-01T00:00:00Z","message":{"role":"assistant","content":[{"type":"tool_use","id":"tool-a","name":"Read","input":{}}]}}
 {"type":"user","uuid":"msg-2","parentUuid":"msg-1","timestamp":"2026-01-01T00:00:01Z","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"tool-a","content":[{"type":"text","text":"done"}]}]}}"#;
         let traj = parse(jsonl).unwrap();
-        let tool_call = traj
-            .nodes
-            .iter()
-            .find(|n| n.kind == "tool_call")
-            .expect("tool_call node");
+        let assistant_msg = traj.messages.iter().find(|m| m.id == "msg-1").expect("msg-1");
+        let tool_call = assistant_msg.blocks.iter().find(|b| b.kind == "tool_call").expect("tool_call block");
         assert_eq!(tool_call.id, "tool-a", "tool_call must use block id");
-        let tool_result = traj
-            .nodes
-            .iter()
-            .find(|n| n.kind == "tool_result")
-            .expect("tool_result node");
+
+        let user_msg = traj.messages.iter().find(|m| m.id == "msg-2").expect("msg-2");
+        let tool_result = user_msg.blocks.iter().find(|b| b.kind == "tool_result").expect("tool_result block");
         assert_eq!(
-            tool_result.parent_id,
+            tool_result.tool_call_id,
             Some("tool-a".to_string()),
             "tool_result must link to tool_call via tool_use_id"
-        );
-        assert!(
-            traj.edges.iter().any(|e| e.from == "tool-a" && e.to == tool_result.id),
-            "edge tool_call -> tool_result must exist"
         );
     }
 
@@ -356,40 +335,30 @@ mod tests {
 {"type":"assistant","uuid":"msg-3","parentUuid":"msg-2","timestamp":"2026-01-01T00:00:02Z","message":{"role":"assistant","content":[{"type":"text","text":"thanks"}]}}"#;
         let traj = parse(jsonl).unwrap();
 
-        // Envelope for user tool_result message must exist so msg-3 can find its parent
+        // Message msg-2 must exist for parent chain
         assert!(
-            traj.nodes.iter().any(|n| n.id == "msg-2" && n.kind == "user"),
-            "envelope node msg-2 must exist for parent chain"
+            traj.messages.iter().any(|m| m.id == "msg-2" && m.role.0 == "user"),
+            "message msg-2 must exist for parent chain"
         );
 
         // Conversation chain must be intact
-        assert!(
-            traj.edges.iter().any(|e| e.from == "msg-1" && e.to == "msg-2"),
-            "conversation edge msg-1 -> msg-2 missing"
-        );
-        assert!(
-            traj.edges.iter().any(|e| e.from == "msg-2" && e.to == "msg-3"),
-            "conversation edge msg-2 -> msg-3 missing"
-        );
+        let msg2 = traj.messages.iter().find(|m| m.id == "msg-2").expect("msg-2");
+        assert_eq!(msg2.parent_id, Some("msg-1".to_string()), "msg-2 parent must be msg-1");
+        let msg3 = traj.messages.iter().find(|m| m.id == "msg-3").expect("msg-3");
+        assert_eq!(msg3.parent_id, Some("msg-2".to_string()), "msg-3 parent must be msg-2");
 
-        // Tool result block must have containment edge from its message envelope
-        let tool_result = traj.nodes.iter().find(|n| n.kind == "tool_result").expect("tool_result node");
-        assert!(
-            traj.edges.iter().any(|e| e.from == "msg-2" && e.to == tool_result.id),
-            "containment edge msg-2 -> tool_result missing"
-        );
+        // Tool result block must exist in msg-2
+        let tool_result = msg2.blocks.iter().find(|b| b.kind == "tool_result").expect("tool_result block");
+        assert_eq!(tool_result.tool_call_id, Some("tool-a".to_string()));
     }
 
     #[test]
-    fn test_missing_tool_use_id_does_not_create_empty_edge() {
+    fn test_missing_tool_use_id_does_not_create_empty_tool_call_id() {
         let jsonl = r#"{"type":"user","uuid":"msg-1","parentUuid":"msg-0","timestamp":"2026-01-01T00:00:00Z","message":{"role":"user","content":[{"type":"tool_result","content":[{"type":"text","text":"done"}]}]}}"#;
         let traj = parse(jsonl).unwrap();
-        // No edge from "" should be created
-        assert!(
-            !traj.edges.iter().any(|e| e.from.is_empty()),
-            "must not create edge from empty string when tool_use_id is missing"
-        );
-        // The tool_result should be absorbed into the envelope since no tool_call_id
-        assert_eq!(traj.nodes.len(), 1, "single tool_result without call_id should be absorbed");
+        let msg = traj.messages.iter().find(|m| m.id == "msg-1").expect("msg-1");
+        let tool_result = msg.blocks.iter().find(|b| b.kind == "tool_result").expect("tool_result block");
+        assert!(tool_result.tool_call_id.is_none() || tool_result.tool_call_id.as_ref().unwrap().is_empty(),
+            "must not set tool_call_id when tool_use_id is missing");
     }
 }
