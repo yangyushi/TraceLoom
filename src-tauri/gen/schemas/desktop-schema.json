@@ -189,6 +189,12 @@
           "markdownDescription": "Allows the load_trajectory command to parse JSONL files."
         },
         {
+          "description": "Allows the read_file_text command to copy JSONL file contents.",
+          "type": "string",
+          "const": "allow-read-file-text",
+          "markdownDescription": "Allows the read_file_text command to copy JSONL file contents."
+        },
+        {
           "description": "Default core plugins set.\n#### This default permission set includes:\n\n- `core:path:default`\n- `core:event:default`\n- `core:window:default`\n- `core:webview:default`\n- `core:app:default`\n- `core:image:default`\n- `core:resources:default`\n- `core:menu:default`\n- `core:tray:default`",
           "type": "string",
           "const": "core:default",

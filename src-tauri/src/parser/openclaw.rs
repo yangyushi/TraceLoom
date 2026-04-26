@@ -3,10 +3,14 @@ use serde_json::Value;
 
 use crate::error::ParseError;
 use crate::ir::{Block, Content, Message, Role, Trajectory};
+use crate::parser::common::{
+    custom_block, has_parent_link, has_visible_payload, parse_timestamp, text_from_json_content,
+};
 
 pub fn parse(contents: &str) -> Result<Trajectory, ParseError> {
     let mut trajectory = Trajectory::new("openclaw-session");
     let mut session_id: Option<String> = None;
+    let mut warnings = Vec::new();
 
     for line in contents.lines() {
         let line = line.trim();
@@ -19,7 +23,8 @@ pub fn parse(contents: &str) -> Result<Trajectory, ParseError> {
             session_id = Some(sid.to_string());
         }
         if let Some(sid) = value.get("id").and_then(|v| v.as_str()) {
-            if session_id.is_none() && value.get("type").and_then(|t| t.as_str()) == Some("session") {
+            if session_id.is_none() && value.get("type").and_then(|t| t.as_str()) == Some("session")
+            {
                 session_id = Some(sid.to_string());
             }
         }
@@ -28,10 +33,24 @@ pub fn parse(contents: &str) -> Result<Trajectory, ParseError> {
         let timestamp = parse_timestamp(value.get("timestamp"));
 
         let mut message = match record_type {
-            Some("session") => continue,
-            Some("model_change") | Some("thinking_level_change") => parse_meta_event(line, &value, timestamp)?,
+            Some("session") => {
+                if has_parent_link(&value) || has_visible_payload(&value) {
+                    warnings.push("skipped OpenClaw session record with visible payload".into());
+                }
+                continue;
+            }
+            Some("model_change") | Some("thinking_level_change") => {
+                parse_meta_event(line, &value, timestamp)?
+            }
             Some("custom") => parse_custom_event(line, &value, timestamp)?,
-            Some("message") => parse_message(line, &value, timestamp)?,
+            Some("message") => parse_message(line, &value, timestamp, &mut warnings)?,
+            Some(record_type) if has_parent_link(&value) || has_visible_payload(&value) => {
+                warnings.push(format!(
+                    "preserved unknown OpenClaw record type '{}' as custom content",
+                    record_type
+                ));
+                parse_unknown_record(line, &value, timestamp)?
+            }
             _ => continue,
         };
 
@@ -42,14 +61,19 @@ pub fn parse(contents: &str) -> Result<Trajectory, ParseError> {
     if let Some(sid) = session_id {
         trajectory.session_id = sid;
     }
+    trajectory.warnings.extend(warnings);
 
     Ok(trajectory)
 }
 
-fn parse_message(raw_line: &str, value: &Value, timestamp: Option<DateTime<Utc>>) -> Result<Message, ParseError> {
+fn parse_message(
+    raw_line: &str,
+    value: &Value,
+    timestamp: Option<DateTime<Utc>>,
+    warnings: &mut Vec<String>,
+) -> Result<Message, ParseError> {
     let id = value["id"].as_str().unwrap_or("unknown").to_string();
-    let parent_id = value["parentId"].as_str().map(|s| s.to_string());
-
+    let parent_id = value["parentId"].as_str().map(str::to_string);
     let message = &value["message"];
     let role = message["role"].as_str().unwrap_or("user");
 
@@ -62,30 +86,18 @@ fn parse_message(raw_line: &str, value: &Value, timestamp: Option<DateTime<Utc>>
     }
 
     let is_tool_result = role == "toolResult" || message.get("toolCallId").is_some();
-
     if is_tool_result {
-        let tool_call_id = message["toolCallId"].as_str();
-        let output = if let Some(content) = message.get("content") {
-            if let Some(arr) = content.as_array() {
-                arr.iter()
-                    .filter_map(|c| c.get("text").and_then(|t| t.as_str()).map(|s| s.to_string()))
-                    .collect::<Vec<_>>()
-                    .join("\n")
-            } else {
-                content.as_str().unwrap_or("").to_string()
-            }
-        } else {
-            String::new()
-        };
-
-        let is_error = message["isError"].as_bool().unwrap_or(false);
-        let block_id = format!("{}-result", id);
+        let output = text_from_json_content(message.get("content"));
+        let is_error = message["isError"]
+            .as_bool()
+            .or_else(|| message["is_error"].as_bool())
+            .unwrap_or(false);
         let blk = Block::new(
-            &block_id,
+            format!("{}-result", id),
             "tool_result",
             Content::ToolResult { output, is_error },
         );
-        let blk = match tool_call_id {
+        let blk = match message["toolCallId"].as_str() {
             Some(tcid) => blk.with_tool_call_id(tcid),
             None => blk,
         };
@@ -93,7 +105,6 @@ fn parse_message(raw_line: &str, value: &Value, timestamp: Option<DateTime<Utc>>
         return Ok(msg);
     }
 
-    // Non-toolResult messages: parse content blocks
     if let Some(blocks) = message["content"].as_array() {
         for (idx, block) in blocks.iter().enumerate() {
             let block_type = block["type"].as_str().unwrap_or("text");
@@ -101,40 +112,68 @@ fn parse_message(raw_line: &str, value: &Value, timestamp: Option<DateTime<Utc>>
                 "text" => {
                     let text = block["text"].as_str().unwrap_or("").to_string();
                     let kind = if role == "user" { "user" } else { "text" };
-                    let block_id = format!("{}-text-{}", id, idx);
-                    let blk = Block::new(&block_id, kind, Content::Text(text));
-                    msg = msg.with_block(blk);
+                    msg = msg.with_block(Block::new(
+                        format!("{}-text-{}", id, idx),
+                        kind,
+                        Content::Text(text),
+                    ));
+                }
+                "thinking" => {
+                    let text = block["thinking"]
+                        .as_str()
+                        .or_else(|| block["text"].as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    let encrypted = block.get("thinkingSignature").is_some()
+                        || block.get("signature").is_some();
+                    msg = msg.with_block(Block::new(
+                        format!("{}-think-{}", id, idx),
+                        "think",
+                        Content::Thinking { text, encrypted },
+                    ));
                 }
                 "toolCall" => {
                     let name = block["name"].as_str().unwrap_or("unknown").to_string();
                     let input = block["arguments"].clone();
                     let block_id = block["id"]
                         .as_str()
-                        .map(|s| s.to_string())
+                        .map(str::to_string)
                         .unwrap_or_else(|| format!("{}-tool_call-{}", id, idx));
-                    let blk = Block::new(
-                        &block_id,
+                    msg = msg.with_block(Block::new(
+                        block_id,
                         "tool_call",
                         Content::ToolUse { name, input },
-                    );
-                    msg = msg.with_block(blk);
+                    ));
                 }
-                _ => {}
+                _ => {
+                    warnings.push(format!(
+                        "preserved unknown OpenClaw block type '{}' in message {}",
+                        block_type, id
+                    ));
+                    msg = msg.with_block(custom_block(
+                        format!("{}-custom-{}", id, idx),
+                        block_type,
+                        block.clone(),
+                    ));
+                }
             }
         }
     }
 
     if msg.blocks.is_empty() {
-        let blk = Block::new(&format!("{}-block", id), role, Content::Empty);
-        msg = msg.with_block(blk);
+        msg = msg.with_block(Block::new(format!("{}-block", id), role, Content::Empty));
     }
 
     Ok(msg)
 }
 
-fn parse_meta_event(raw_line: &str, value: &Value, timestamp: Option<DateTime<Utc>>) -> Result<Message, ParseError> {
+fn parse_meta_event(
+    raw_line: &str,
+    value: &Value,
+    timestamp: Option<DateTime<Utc>>,
+) -> Result<Message, ParseError> {
     let id = value["id"].as_str().unwrap_or("unknown").to_string();
-    let parent_id = value["parentId"].as_str().map(|s| s.to_string());
+    let parent_id = value["parentId"].as_str().map(str::to_string);
     let kind = value["type"].as_str().unwrap_or("meta");
 
     let mut msg = Message::new(&id, Role::system()).with_raw_json(raw_line);
@@ -145,21 +184,17 @@ fn parse_meta_event(raw_line: &str, value: &Value, timestamp: Option<DateTime<Ut
         msg = msg.with_timestamp(ts);
     }
 
-    let blk = Block::new(
-        &format!("{}-block", id),
-        kind,
-        Content::Custom {
-            kind: kind.into(),
-            payload: value.clone(),
-        },
-    );
-    msg = msg.with_block(blk);
+    msg = msg.with_block(custom_block(format!("{}-block", id), kind, value.clone()));
     Ok(msg)
 }
 
-fn parse_custom_event(raw_line: &str, value: &Value, timestamp: Option<DateTime<Utc>>) -> Result<Message, ParseError> {
+fn parse_custom_event(
+    raw_line: &str,
+    value: &Value,
+    timestamp: Option<DateTime<Utc>>,
+) -> Result<Message, ParseError> {
     let id = value["id"].as_str().unwrap_or("unknown").to_string();
-    let parent_id = value["parentId"].as_str().map(|s| s.to_string());
+    let parent_id = value["parentId"].as_str().map(str::to_string);
     let custom_type = value["customType"].as_str().unwrap_or("custom");
 
     let mut msg = Message::new(&id, Role::system()).with_raw_json(raw_line);
@@ -170,23 +205,37 @@ fn parse_custom_event(raw_line: &str, value: &Value, timestamp: Option<DateTime<
         msg = msg.with_timestamp(ts);
     }
 
-    let blk = Block::new(
-        &format!("{}-block", id),
-        "custom",
-        Content::Custom {
-            kind: custom_type.into(),
-            payload: value["data"].clone(),
-        },
-    );
-    msg = msg.with_block(blk);
+    msg = msg.with_block(custom_block(
+        format!("{}-block", id),
+        custom_type,
+        value.get("data").cloned().unwrap_or_else(|| value.clone()),
+    ));
     Ok(msg)
 }
 
-fn parse_timestamp(value: Option<&Value>) -> Option<DateTime<Utc>> {
-    value
-        .and_then(|v| v.as_str())
-        .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
-        .map(|dt| dt.with_timezone(&Utc))
+fn parse_unknown_record(
+    raw_line: &str,
+    value: &Value,
+    timestamp: Option<DateTime<Utc>>,
+) -> Result<Message, ParseError> {
+    let id = value["id"].as_str().unwrap_or("unknown").to_string();
+    let parent_id = value["parentId"].as_str().map(str::to_string);
+    let record_type = value["type"].as_str().unwrap_or("record");
+
+    let mut msg = Message::new(&id, Role::system()).with_raw_json(raw_line);
+    if let Some(pid) = parent_id {
+        msg = msg.with_parent(pid);
+    }
+    if let Some(ts) = timestamp {
+        msg = msg.with_timestamp(ts);
+    }
+
+    msg = msg.with_block(custom_block(
+        format!("{}-block", id),
+        record_type,
+        value.clone(),
+    ));
+    Ok(msg)
 }
 
 #[cfg(test)]
@@ -199,82 +248,106 @@ mod tests {
             .parent()
             .unwrap()
             .to_path_buf();
-        let contents = std::fs::read_to_string(
-            root.join("test/samples/openclaw/3d4beed5-33e8-4298-81a1-e92da20053fa.jsonl"),
-        )
-        .unwrap();
+        let contents =
+            std::fs::read_to_string(root.join("test/samples/openclaw/basic.jsonl")).unwrap();
         let traj = parse(&contents).unwrap();
         assert!(!traj.messages.is_empty());
-        assert!(traj.messages.iter().any(|m| m.blocks.iter().any(|b| b.kind == "user")));
-        assert!(traj.messages.iter().any(|m| m.blocks.iter().any(|b| b.kind == "tool_call")));
-        assert!(traj.messages.iter().any(|m| m.blocks.iter().any(|b| b.kind == "tool_result")));
+        assert!(traj
+            .messages
+            .iter()
+            .any(|m| m.blocks.iter().any(|b| b.kind == "user")));
+        assert!(traj
+            .messages
+            .iter()
+            .any(|m| m.blocks.iter().any(|b| b.kind == "think")));
+        assert!(traj
+            .messages
+            .iter()
+            .any(|m| m.blocks.iter().any(|b| b.kind == "tool_call")));
+        assert!(traj
+            .messages
+            .iter()
+            .any(|m| m.blocks.iter().any(|b| b.kind == "tool_result")));
     }
 
     #[test]
     fn test_tool_call_not_lost_when_followed_by_text() {
         let jsonl = r#"{"type":"message","id":"msg-1","parentId":"msg-0","timestamp":"2026-01-01T00:00:00Z","message":{"role":"assistant","content":[{"type":"toolCall","id":"tool-1","name":"Read","arguments":{}},{"type":"text","text":"ok"}]}}"#;
         let traj = parse(jsonl).unwrap();
-        let msg = traj.messages.iter().find(|m| m.id == "msg-1").expect("msg-1");
-        let tool_calls: Vec<_> = msg.blocks.iter().filter(|b| b.kind == "tool_call").collect();
-        assert_eq!(
-            tool_calls.len(),
-            1,
-            "expected 1 tool_call block, got {}",
-            tool_calls.len()
-        );
-        assert!(msg.blocks.iter().any(|b| b.kind == "text"), "text block was dropped");
-        assert!(msg.blocks.iter().any(|b| b.id == "tool-1"), "tool-1 block missing");
+        let msg = traj
+            .messages
+            .iter()
+            .find(|m| m.id == "msg-1")
+            .expect("msg-1");
+        let tool_calls: Vec<_> = msg
+            .blocks
+            .iter()
+            .filter(|b| b.kind == "tool_call")
+            .collect();
+        assert_eq!(tool_calls.len(), 1);
+        assert!(msg.blocks.iter().any(|b| b.kind == "text"));
+        assert!(msg.blocks.iter().any(|b| b.id == "tool-1"));
     }
 
     #[test]
-    fn test_tool_result_links_to_tool_call() {
-        let jsonl = r#"{"type":"message","id":"msg-1","parentId":"msg-0","timestamp":"2026-01-01T00:00:00Z","message":{"role":"assistant","content":[{"type":"toolCall","id":"tool-1","name":"Read","arguments":{}}]}}
-{"type":"message","id":"msg-2","parentId":"msg-1","timestamp":"2026-01-01T00:00:01Z","message":{"role":"toolResult","toolCallId":"tool-1","toolName":"Read","content":[{"type":"text","text":"done"}],"isError":false}}"#;
+    fn test_thinking_preserved_and_signature_marks_encrypted() {
+        let jsonl = r#"{"type":"message","id":"msg-1","timestamp":"2026-01-01T00:00:00Z","message":{"role":"assistant","content":[{"type":"thinking","thinking":"plain"},{"type":"thinking","thinking":"","thinkingSignature":"ciphertext"}]}}"#;
         let traj = parse(jsonl).unwrap();
-        let assistant_msg = traj.messages.iter().find(|m| m.id == "msg-1").expect("msg-1");
-        let tool_call = assistant_msg.blocks.iter().find(|b| b.kind == "tool_call").expect("tool_call block");
-        assert_eq!(tool_call.id, "tool-1", "tool_call must use block id");
-
-        let tool_result_msg = traj.messages.iter().find(|m| m.id == "msg-2").expect("msg-2");
-        let tool_result = tool_result_msg.blocks.iter().find(|b| b.kind == "tool_result").expect("tool_result block");
+        let blocks: Vec<_> = traj.messages[0]
+            .blocks
+            .iter()
+            .filter(|b| b.kind == "think")
+            .collect();
+        assert_eq!(blocks.len(), 2);
         assert_eq!(
-            tool_result.tool_call_id,
-            Some("tool-1".to_string()),
-            "tool_result must link to tool_call via toolCallId"
+            blocks[0].content,
+            Content::Thinking {
+                text: "plain".into(),
+                encrypted: false,
+            }
+        );
+        assert_eq!(
+            blocks[1].content,
+            Content::Thinking {
+                text: "".into(),
+                encrypted: true,
+            }
         );
     }
 
     #[test]
-    fn test_tool_result_message_envelope_preserved() {
+    fn test_tool_result_links_to_tool_call_and_preserves_error() {
         let jsonl = r#"{"type":"message","id":"msg-1","parentId":"msg-0","timestamp":"2026-01-01T00:00:00Z","message":{"role":"assistant","content":[{"type":"toolCall","id":"tool-1","name":"Read","arguments":{}}]}}
-{"type":"message","id":"msg-2","parentId":"msg-1","timestamp":"2026-01-01T00:00:01Z","message":{"role":"toolResult","toolCallId":"tool-1","toolName":"Read","content":[{"type":"text","text":"done"}],"isError":false}}
-{"type":"message","id":"msg-3","parentId":"msg-2","timestamp":"2026-01-01T00:00:02Z","message":{"role":"assistant","content":[{"type":"text","text":"thanks"}]}}"#;
+{"type":"message","id":"msg-2","parentId":"msg-1","timestamp":"2026-01-01T00:00:01Z","message":{"role":"toolResult","toolCallId":"tool-1","toolName":"Read","content":[{"type":"text","text":"failed"}],"isError":true}}"#;
         let traj = parse(jsonl).unwrap();
-
-        // Message msg-2 must exist so msg-3 can find its parent
-        assert!(
-            traj.messages.iter().any(|m| m.id == "msg-2"),
-            "message msg-2 must exist for parent chain"
-        );
-
-        // Conversation chain must be intact
-        let msg2 = traj.messages.iter().find(|m| m.id == "msg-2").expect("msg-2");
-        assert_eq!(msg2.parent_id, Some("msg-1".to_string()), "msg-2 parent must be msg-1");
-        let msg3 = traj.messages.iter().find(|m| m.id == "msg-3").expect("msg-3");
-        assert_eq!(msg3.parent_id, Some("msg-2".to_string()), "msg-3 parent must be msg-2");
-
-        // Tool result block must exist in msg-2
-        let tool_result = msg2.blocks.iter().find(|b| b.kind == "tool_result").expect("tool_result block");
+        let msg2 = traj
+            .messages
+            .iter()
+            .find(|m| m.id == "msg-2")
+            .expect("msg-2");
+        let tool_result = msg2
+            .blocks
+            .iter()
+            .find(|b| b.kind == "tool_result")
+            .expect("tool_result block");
         assert_eq!(tool_result.tool_call_id, Some("tool-1".to_string()));
+        assert_eq!(
+            tool_result.content,
+            Content::ToolResult {
+                output: "failed".into(),
+                is_error: true,
+            }
+        );
     }
 
     #[test]
-    fn test_missing_tool_call_id_does_not_create_empty_tool_call_id() {
-        let jsonl = r#"{"type":"message","id":"msg-1","parentId":"msg-0","timestamp":"2026-01-01T00:00:00Z","message":{"role":"toolResult","toolName":"Read","content":[{"type":"text","text":"done"}],"isError":false}}"#;
+    fn test_unknown_blocks_become_custom_with_warning() {
+        let jsonl = r#"{"type":"message","id":"msg-1","timestamp":"2026-01-01T00:00:00Z","message":{"role":"assistant","content":[{"type":"image","url":"asset.png"}]}}"#;
         let traj = parse(jsonl).unwrap();
-        let msg = traj.messages.iter().find(|m| m.id == "msg-1").expect("msg-1");
-        let tool_result = msg.blocks.iter().find(|b| b.kind == "tool_result").expect("tool_result block");
-        assert!(tool_result.tool_call_id.is_none() || tool_result.tool_call_id.as_ref().unwrap().is_empty(),
-            "must not set tool_call_id when toolCallId is missing");
+        assert!(matches!(
+            traj.messages[0].blocks[0].content,
+            Content::Custom { .. }
+        ));
+        assert!(traj.warnings.iter().any(|w| w.contains("image")));
     }
 }

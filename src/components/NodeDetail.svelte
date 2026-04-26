@@ -1,8 +1,6 @@
 <script lang="ts">
-  import { marked } from "marked";
-  import * as Prism from "prismjs";
-  import "prismjs/components/prism-json";
   import type { Message, Block } from "../types/ir";
+  import { getBlockRawText } from "../lib/blockPreview";
 
   interface MessageItem {
     type: "message";
@@ -23,64 +21,101 @@
   let { item, onClose }: Props = $props();
   let showMarkdown = $state(false);
   let showItems = $state(false);
+  let rendererVersion = $state(0);
+  let markedParser: typeof import("marked").marked | null = null;
+  let prism: typeof import("prismjs") | null = null;
+  let loadingMarked = false;
+  let loadingPrism = false;
 
-  function getRawText(block: Block): string {
-    const c = block.content;
-    switch (c.type) {
-      case "Text":
-        return c.data;
-      case "Thinking":
-        return c.data.text;
-      case "ToolUse":
-        return `${c.data.name}\n${JSON.stringify(c.data.input, null, 2)}`;
-      case "ToolResult":
-        return c.data.output;
-      case "Snapshot":
-        return c.data.description;
-      case "Custom":
-        return JSON.stringify(c.data.payload, null, 2);
-      default:
-        return "";
-    }
+  const MAX_JSON_EXTRACTION_BYTES = 200_000;
+
+  function ensureMarked() {
+    if (markedParser || loadingMarked) return;
+    loadingMarked = true;
+    void import("marked").then((module) => {
+      markedParser = module.marked;
+      loadingMarked = false;
+      rendererVersion += 1;
+    });
+  }
+
+  function ensurePrism() {
+    if (prism || loadingPrism) return;
+    loadingPrism = true;
+    void import("prismjs").then(async (module) => {
+      await import("prismjs/components/prism-json");
+      prism = module;
+      loadingPrism = false;
+      rendererVersion += 1;
+    });
   }
 
   /**
    * Try to extract a JSON object or array from anywhere inside the text.
    */
   function findJsonInText(text: string): string | null {
-    let braceIdx = text.indexOf("{");
-    let bracketIdx = text.indexOf("[");
-    let start = -1;
-    if (braceIdx >= 0 && bracketIdx >= 0) {
-      start = Math.min(braceIdx, bracketIdx);
-    } else if (braceIdx >= 0) {
-      start = braceIdx;
-    } else if (bracketIdx >= 0) {
-      start = bracketIdx;
-    }
-    if (start < 0) return null;
+    if (text.length > MAX_JSON_EXTRACTION_BYTES) return null;
 
-    for (let end = start + 2; end <= text.length; end++) {
-      const candidate = text.slice(start, end);
-      try {
-        JSON.parse(candidate);
-        return candidate;
-      } catch {
-        // continue expanding
+    for (let start = 0; start < text.length; start++) {
+      const opener = text[start];
+      if (opener !== "{" && opener !== "[") continue;
+      const closer = opener === "{" ? "}" : "]";
+      const stack = [closer];
+      let inString = false;
+      let escaped = false;
+
+      for (let idx = start + 1; idx < text.length; idx++) {
+        const ch = text[idx];
+        if (escaped) {
+          escaped = false;
+          continue;
+        }
+        if (ch === "\\") {
+          escaped = inString;
+          continue;
+        }
+        if (ch === "\"") {
+          inString = !inString;
+          continue;
+        }
+        if (inString) continue;
+        if (ch === "{" || ch === "[") {
+          stack.push(ch === "{" ? "}" : "]");
+          continue;
+        }
+        if (ch === "}" || ch === "]") {
+          if (stack.pop() !== ch) break;
+          if (stack.length === 0 && ch === closer) {
+            const candidate = text.slice(start, idx + 1);
+            try {
+              JSON.parse(candidate);
+              return candidate;
+            } catch {
+              break;
+            }
+          }
+        }
       }
     }
     return null;
   }
 
   function highlightJson(text: string): string {
+    rendererVersion;
+    ensurePrism();
     try {
       JSON.parse(text);
-      return Prism.highlight(text, Prism.languages.json, "json");
+      if (prism?.languages.json) {
+        return sanitizeHtml(prism.highlight(text, prism.languages.json, "json"));
+      }
+      return escapeHtml(text);
     } catch {
       const jsonBlock = findJsonInText(text);
       if (jsonBlock) {
         const before = escapeHtml(text.slice(0, text.indexOf(jsonBlock)));
-        const highlighted = Prism.highlight(jsonBlock, Prism.languages.json, "json");
+        const highlighted = prism?.languages.json
+          ? sanitizeHtml(prism.highlight(jsonBlock, prism.languages.json, "json"))
+          : escapeHtml(jsonBlock);
         const after = escapeHtml(text.slice(text.indexOf(jsonBlock) + jsonBlock.length));
         return `${before}${highlighted}${after}`;
       }
@@ -93,6 +128,70 @@
       .replace(/&/g, "&amp;")
       .replace(/</g, "&lt;")
       .replace(/>/g, "&gt;");
+  }
+
+  function sanitizeHtml(html: string): string {
+    const allowedTags = new Set([
+      "A",
+      "BLOCKQUOTE",
+      "BR",
+      "CODE",
+      "DEL",
+      "EM",
+      "H1",
+      "H2",
+      "H3",
+      "H4",
+      "H5",
+      "H6",
+      "HR",
+      "LI",
+      "OL",
+      "P",
+      "PRE",
+      "SPAN",
+      "STRONG",
+      "TABLE",
+      "TBODY",
+      "TD",
+      "TH",
+      "THEAD",
+      "TR",
+      "UL",
+    ]);
+    const template = document.createElement("template");
+    template.innerHTML = html;
+
+    const walk = (node: Node) => {
+      for (const child of Array.from(node.childNodes)) {
+        if (child.nodeType === Node.ELEMENT_NODE) {
+          const element = child as HTMLElement;
+          if (!allowedTags.has(element.tagName)) {
+            element.replaceWith(document.createTextNode(element.textContent ?? ""));
+            continue;
+          }
+          for (const attr of Array.from(element.attributes)) {
+            const name = attr.name.toLowerCase();
+            const value = attr.value;
+            const isSafeHref =
+              element.tagName === "A"
+              && name === "href"
+              && /^(https?:|mailto:|#)/.test(value);
+            const isSafeClass =
+              (element.tagName === "SPAN" || element.tagName === "CODE")
+              && name === "class"
+              && /^[a-z0-9_\- ]+$/i.test(value);
+            if (!isSafeHref && !isSafeClass) {
+              element.removeAttribute(attr.name);
+            }
+          }
+        }
+        walk(child);
+      }
+    };
+
+    walk(template.content);
+    return template.innerHTML;
   }
 
   interface Section {
@@ -139,10 +238,13 @@
   }
 
   function renderMarkdown(value: string): string {
+    rendererVersion;
+    ensureMarked();
     try {
-      return marked.parse(value, { async: false }) as string;
+      if (!markedParser) return escapeHtml(value);
+      return sanitizeHtml(markedParser.parse(escapeHtml(value), { async: false }) as string);
     } catch {
-      return value;
+      return escapeHtml(value);
     }
   }
 
@@ -259,7 +361,7 @@
 
       {#if showMarkdown}
         <div class="markdown-sections">
-          {#each parseSections(getRawText(block)) as section}
+          {#each parseSections(getBlockRawText(block)) as section}
             <details class="markdown-section" open>
               <summary class="section-title">{section.key}</summary>
               <div class="markdown-body">
@@ -273,7 +375,7 @@
           {/each}
         </div>
       {:else}
-        <pre class="raw-body">{@html highlightJson(getRawText(block))}</pre>
+        <pre class="raw-body">{@html highlightJson(getBlockRawText(block))}</pre>
       {/if}
     </div>
   {/if}

@@ -1,148 +1,116 @@
-# IR Design — Messages and Blocks ARE the Graph
+# IR Design: Messages and Blocks Are the Graph
 
 ## Core Principle
 
-One JSONL line = one `Message`.  
-One content element inside a message = one `Block`.  
-Both `Message` and `Block` are first-class vertices in the render graph.  
-There is no separate `Node` / `Edge` layer — the graph is derived on demand from the domain model.
+One JSONL line becomes one `Message`. One content element inside that line becomes one `Block`. Both `Message` and `Block` are graph vertices; there is no separate persisted `Node` or `Edge` layer.
+
+The graph is derived from:
+
+- `message.parent_id -> message.id` for conversation edges
+- `message.id -> block.id` for containment edges
+- `block.tool_call_id -> block.id` for tool result edges
 
 ## Types
 
-### Message
-
-Represents a single JSONL line from the source file.
+### `Trajectory`
 
 | Field | Meaning |
-|-------|---------|
-| `id` | Unique identifier (usually from the JSONL line) |
-| `parent_id` | ID of the previous message in the conversation chain |
-| `role` | `"user"`, `"assistant"`, `"system"`, `"tool"`, etc. |
-| `timestamp` | Optional RFC-3339 timestamp |
-| `blocks` | Ordered list of `Block`s parsed from the message's content array |
-| `is_sidechain` | True for branched / non-mainline messages |
-| `raw_json` | The original JSON string from the JSONL file (for debugging) |
+| --- | --- |
+| `session_id` | Conversation/session identifier |
+| `messages` | Source-of-truth message envelopes |
+| `orphans` | Message IDs whose `parent_id` is missing |
+| `warnings` | Non-fatal parser or validation issues |
 
-Key invariant: every message gets its own envelope. There is no "absorption" optimization that collapses a single-block message into one node. The message envelope always exists so the parent chain is always intact.
+`raw_json` is intentionally preserved on each `Message` for debugging and inspector display. This keeps parsing lossless for current desktop workloads. If very large logs become a problem, the future path is streaming or external raw-line storage, not adding source-specific fields to the IR.
 
-### Block
-
-Represents one element in the content collection of a message.
+### `Message`
 
 | Field | Meaning |
-|-------|---------|
-| `id` | Unique identifier (distinct from its parent message's id) |
-| `kind` | `"user"`, `"text"`, `"think"`, `"tool_call"`, `"tool_result"`, `"snapshot"`, etc. |
-| `content` | Typed payload (`Text`, `ToolUse`, `ToolResult`, `Thinking`, `Snapshot`, `Custom`) |
-| `tool_call_id` | For `tool_result` blocks: the id of the `tool_call` block they respond to |
+| --- | --- |
+| `id` | Unique message ID |
+| `parent_id` | Previous message in the conversation chain, when known |
+| `role` | `user`, `assistant`, `system`, `tool`, or another source role |
+| `timestamp` | Optional RFC 3339 timestamp |
+| `blocks` | Ordered content blocks |
+| `is_sidechain` | True for branched/non-mainline records |
+| `raw_json` | Original JSONL line |
 
-Key invariant: a block's id is never equal to its parent message's id. Parsers synthesize distinct block ids (e.g. `{msg-id}-block`, `{msg-id}-text-0`) to avoid collisions.
+Every parsed record that represents user-visible content keeps its message envelope. Parsers do not collapse a single-block message into a block-only node.
 
-### Trajectory
-
-Top-level container.
+### `Block`
 
 | Field | Meaning |
-|-------|---------|
-| `session_id` | Conversation / session identifier |
-| `messages` | Ordered list of `Message`s (source of truth) |
-| `orphans` | Message ids whose `parent_id` does not exist in the trajectory |
-| `warnings` | Non-fatal issues found during validation |
+| --- | --- |
+| `id` | Unique block ID, distinct from the parent message ID |
+| `kind` | Render kind such as `user`, `text`, `think`, `tool_call`, `tool_result`, `snapshot`, or `custom` |
+| `content` | Typed payload: `Text`, `Thinking`, `ToolUse`, `ToolResult`, `Snapshot`, or `Custom` |
+| `tool_call_id` | Referenced tool call block for tool results |
 
-There are no `nodes` or `edges` arrays. All graph relationships are derived from `messages`:
-
-- Conversation chain: `message.parent_id → message.id`
-- Containment: implicit — a block belongs to the message whose `blocks` array contains it
-- Tool link: `block.tool_call_id → block.id` (cross-message reference)
+Unknown source blocks are preserved as `Content::Custom { kind, payload }` and a parser warning is added. Source-specific data belongs in `raw_json` or `Content::Custom.payload`, never in dedicated IR fields.
 
 ## Parser Responsibilities
 
-Each parser (Claude, OpenClaw, Codex) reads a `.jsonl` file and produces a `Trajectory` of `Message`s.
+Parsers are the only source-specific layer. They must:
 
-1. Preserve the raw line — every `Message` stores its original JSON string in `raw_json`
-2. Create distinct block ids — never reuse the message id as a block id
-3. Set `tool_call_id` only when present — do not fall back to empty string or message uuid
-4. Do not call `flatten()` — there is no graph flattening step; the domain model is the graph
+- Preserve raw lines in `Message.raw_json`
+- Preserve supported and unknown user-visible content blocks
+- Represent encrypted reasoning without attempting decryption
+- Preserve tool result error state when the source provides it
+- Emit warnings for unknown or skipped meaningful records
+- Return a trajectory that passes `Trajectory::validate()`
 
-### Example: Claude parser
+Pure setup/session records may be skipped only when they are metadata. If a skipped-looking record has parent links or visible payload, it must be preserved or warned about.
 
-Input JSONL line (assistant with tool use):
-```json
-{"type":"assistant","uuid":"msg-1","parentUuid":"msg-0","message":{"role":"assistant","content":[{"type":"tool_use","id":"tool-a","name":"Read","input":{}}]}}
-```
+## Validation
 
-Produces:
+`Trajectory::validate()` enforces hard invariants:
 
-```rust
-Message {
-  id: "msg-1",
-  parent_id: Some("msg-0"),
-  role: Role("assistant"),
-  blocks: [
-    Block {
-      id: "tool-a",
-      kind: "tool_call",
-      content: ToolUse { name: "Read", input: {} },
-      tool_call_id: None,
-    }
-  ],
-  raw_json: Some("<original json string>"),
-}
-```
+- Duplicate message or block IDs are errors
+- Cycles in the parent chain are errors
+- A parent timestamp more than one second after a child timestamp is an error
+- Missing parents are fail-soft: the child message remains, its ID is added to `orphans`, and a warning is emitted
+- Invalid `tool_call_id` references are warnings
 
-## Validation (`Trajectory::validate()`)
+Validation is idempotent. Re-running it does not duplicate generated orphans or warnings.
 
-Run after parsing. Checks:
+## Ordering
 
-1. Duplicate ids — no two messages or blocks may share an id
-2. Orphan parents — every `message.parent_id` must reference an existing message
-3. Temporal consistency — a parent message's timestamp must not be after its child's
-4. Cycles — the `parent_id` chain must not contain cycles
-5. Invalid tool_call_id — every `block.tool_call_id` must reference an existing block id (warning, not error)
+Rust and TypeScript use the same ordering rule:
 
+1. Parent messages always appear before children when the parent exists.
+2. Among messages available at the same graph depth, the earlier timestamp appears first.
+3. Source order is the stable tie-breaker.
+4. Cyclic or otherwise unvisited messages are appended in source order after validation fallback.
+
+The frontend helper in `src/lib/order.ts` is shared by Dots, Bricks, keyboard navigation, and inspector selection lookup.
 
 ## Rendering
 
-### Dots view  `DotsRenderer`
+### Dots
 
-Messages form a vertical spine; blocks branch horizontally to the right.
+Messages form a vertical spine. Blocks from the same message branch horizontally on the same row as their parent message:
 
-- Message node at `x = 0`, `y = index  adaptive_spacing`
-  - Colored by `role`
-  - Label = capitalized initial of role ("U", "A", "S", "T")
-- Block node at `x = 140 + i  45`, `y = message_y + (i - n/2)  50`
-  - Colored by `kind`
-  - Lower index = closer to the message spine
-- Edges
-  - `parent_id → message` (solid gray) — conversation chain
-  - `message → block` (dashed gray) — containment
-  - `tool_call_id → tool_result` (solid blue) — tool link
+- Message node: `x = 0`, `y = ordered_index * adaptive_spacing`
+- Block node: `x = 140 + block_index * 45`, `y = message_y`
+- Chain edges are solid gray
+- Containment edges are dashed gray
+- Tool result edges are solid blue
 
-Cytoscape uses a `preset` layout: positions are computed from the `messages` / `blocks` data and assigned directly.
+Cytoscape uses a preset layout; positions are computed from the shared ordered message list.
 
-### Bricks view  `BricksRenderer`
+### Bricks
 
-Messages render as a vertical timeline of "bricks". Each message brick shows its role and block count. Blocks are indented sub-bricks underneath their parent message.
+Bricks renders the same ordered message list as a vertical timeline. Each message brick is followed by its block bricks, indented below it. Keyboard navigation uses the shared ordered item list.
 
-### Detail panel  `NodeDetail`
+### Inspector
 
-- Message selected: shows metadata (id, role, parent, timestamp, block count) + collapsible "Raw JSON" section displaying the original JSONL line
-- Block selected: shows metadata (id, kind, tool_call_id) + parsed content with Raw / Markdown toggle
+The inspector renders message metadata, raw JSON, block metadata, raw content, markdown, and JSON sections. Markdown input is escaped before rendering, rendered HTML is sanitized, and expensive embedded JSON probing is bounded.
 
+## Tauri Commands
 
-## File Map
+Every Tauri command must be whitelisted in both:
 
-| Rust | Purpose |
-|------|---------|
-| `src-tauri/src/ir/message.rs` | `Message`, `Block`, `Role` |
-| `src-tauri/src/ir/trajectory.rs` | `Trajectory`, `validate()`, `topological_order()` |
-| `src-tauri/src/ir/content.rs` | `Content` enum |
-| `src-tauri/src/parser/{claude,openclaw,codex}.rs` | Format-specific parsers |
+- `src-tauri/permissions/default.toml`
+- `src-tauri/capabilities/default.json`
 
-| TypeScript | Purpose |
-|------------|---------|
-| `src/types/ir.ts` | Frontend type mirrors |
-| `src/components/DotsRenderer.svelte` | Cytoscape graph with preset layout |
-| `src/components/BricksRenderer.svelte` | Vertical brick timeline |
-| `src/components/NodeDetail.svelte` | Inspector panel for messages / blocks |
-| `src/lib/colors.ts` | Color schema by `kind` / `role` |
+Current commands are `load_trajectory`, `list_jsonl_files`, and `read_file_text`.

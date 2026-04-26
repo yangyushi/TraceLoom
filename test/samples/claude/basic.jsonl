@@ -1,0 +1,6 @@
+{"type":"user","uuid":"claude-user-1","parentUuid":null,"sessionId":"claude-synthetic","timestamp":"2026-01-01T00:00:00Z","message":{"role":"user","content":"Hello"}}
+{"type":"assistant","uuid":"claude-assistant-1","parentUuid":"claude-user-1","sessionId":"claude-synthetic","timestamp":"2026-01-01T00:00:01Z","message":{"role":"assistant","content":[{"type":"thinking","thinking":"Plan the answer."},{"type":"tool_use","id":"claude-tool-1","name":"Read","input":{"path":"notes.md"}},{"type":"attachment","name":"notes.md"}],"stop_reason":"tool_use"}}
+{"type":"user","uuid":"claude-user-2","parentUuid":"claude-assistant-1","sessionId":"claude-synthetic","timestamp":"2026-01-01T00:00:02Z","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"claude-tool-1","content":[{"type":"text","text":"read failed"}],"is_error":true}]}}
+{"type":"file-history-snapshot","messageId":"claude-user-2","parentUuid":"claude-user-2","sessionId":"claude-synthetic","snapshot":{"timestamp":"2026-01-01T00:00:03Z","trackedFileBackups":{"notes.md":{"content":"before"}}}}
+{"type":"last-prompt","sessionId":"claude-synthetic","lastPrompt":"Synthetic prompt marker"}
+{"type":"permission-mode","sessionId":"claude-synthetic","permissionMode":"ask"}

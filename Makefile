@@ -1,4 +1,4 @@
-# LLM Tracer — Build orchestration for Linux and macOS
+# TraceLoom build orchestration for Linux and macOS
 # Requires: Node.js, npm, Rust, cargo, Tauri CLI
 
 .PHONY: all clean dev debug test install

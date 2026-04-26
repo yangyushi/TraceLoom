@@ -1,10 +1,12 @@
 use std::collections::{HashMap, HashSet};
 
-use chrono::DateTime;
+use chrono::{DateTime, TimeDelta};
 use serde::{Deserialize, Serialize};
 
 use super::Message;
 use crate::error::ParseError;
+
+const TEMPORAL_SKEW_TOLERANCE: TimeDelta = TimeDelta::seconds(1);
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Trajectory {
@@ -28,20 +30,34 @@ impl Trajectory {
         self.messages.push(message);
     }
 
-    /// Return messages in topological order (by parent_id chain, fallback to index).
+    /// Return messages in topological order. When two messages are available at
+    /// the same graph depth, the earlier timestamp comes first.
     pub fn topological_order(&self) -> Vec<&Message> {
         let mut result = Vec::with_capacity(self.messages.len());
         let mut visited = HashSet::new();
         let mut adj: HashMap<&str, Vec<&str>> = HashMap::new();
         let mut in_degree: HashMap<&str, usize> = HashMap::new();
+        let msg_map: HashMap<&str, &Message> = self
+            .messages
+            .iter()
+            .map(|msg| (msg.id.as_str(), msg))
+            .collect();
+        let source_index: HashMap<&str, usize> = self
+            .messages
+            .iter()
+            .enumerate()
+            .map(|(idx, msg)| (msg.id.as_str(), idx))
+            .collect();
 
         for msg in &self.messages {
             in_degree.entry(&msg.id).or_insert(0);
         }
         for msg in &self.messages {
             if let Some(ref pid) = msg.parent_id {
-                adj.entry(pid).or_default().push(&msg.id);
-                *in_degree.entry(&msg.id).or_insert(0) += 1;
+                if msg_map.contains_key(pid.as_str()) {
+                    adj.entry(pid).or_default().push(&msg.id);
+                    *in_degree.entry(&msg.id).or_insert(0) += 1;
+                }
             }
         }
 
@@ -50,20 +66,41 @@ impl Trajectory {
             .iter()
             .filter(|m| in_degree.get(m.id.as_str()).copied().unwrap_or(0) == 0)
             .collect();
-        queue.sort_by_key(|m| m.timestamp.unwrap_or_else(|| DateTime::UNIX_EPOCH));
 
-        while let Some(msg) = queue.pop() {
+        let sort_messages = |queue: &mut Vec<&Message>| {
+            queue.sort_by(|a, b| {
+                a.timestamp
+                    .unwrap_or(DateTime::UNIX_EPOCH)
+                    .cmp(&b.timestamp.unwrap_or(DateTime::UNIX_EPOCH))
+                    .then_with(|| {
+                        source_index
+                            .get(a.id.as_str())
+                            .copied()
+                            .unwrap_or(usize::MAX)
+                            .cmp(
+                                &source_index
+                                    .get(b.id.as_str())
+                                    .copied()
+                                    .unwrap_or(usize::MAX),
+                            )
+                    })
+                    .then_with(|| a.id.cmp(&b.id))
+            });
+        };
+
+        while !queue.is_empty() {
+            sort_messages(&mut queue);
+            let msg = queue.remove(0);
             if !visited.insert(&msg.id) {
                 continue;
             }
             result.push(msg);
 
             if let Some(children) = adj.get(msg.id.as_str()) {
-                let mut next: Vec<_> = children
+                let next: Vec<_> = children
                     .iter()
-                    .filter_map(|id| self.messages.iter().find(|m| &m.id == *id))
+                    .filter_map(|id| msg_map.get(*id).copied())
                     .collect();
-                next.sort_by_key(|m| m.timestamp.unwrap_or_else(|| DateTime::UNIX_EPOCH));
                 for child in next {
                     let deg = in_degree
                         .get_mut(child.id.as_str())
@@ -87,7 +124,6 @@ impl Trajectory {
 
     pub fn validate(&mut self) -> Result<(), ParseError> {
         let mut ids = HashSet::new();
-        let _msg_ids: HashSet<_> = self.messages.iter().map(|m| &m.id).collect();
 
         // Check duplicate message IDs
         for msg in &self.messages {
@@ -119,10 +155,9 @@ impl Trajectory {
         // Validate parent_id references and temporal constraints
         for msg in &self.messages {
             if let Some(ref pid) = msg.parent_id {
-                if let Some(parent) = self.messages.iter().find(|m| &m.id == pid) {
-                    // Temporal validation (tolerate up to 1s of clock skew)
+                if let Some(parent) = self.messages.iter().find(|m| m.id == *pid) {
                     if let (Some(pt), Some(ct)) = (parent.timestamp, msg.timestamp) {
-                        if pt > ct + chrono::Duration::seconds(1) {
+                        if pt > ct + TEMPORAL_SKEW_TOLERANCE {
                             return Err(ParseError::InvalidTrajectory(format!(
                                 "temporal violation: parent {} ({}) is after child {} ({})",
                                 pid, pt, msg.id, ct
@@ -151,8 +186,13 @@ impl Trajectory {
             }
         }
 
-        self.orphans.extend(new_orphans);
-        self.warnings.extend(new_warnings);
+        self.orphans = new_orphans;
+        let mut existing_warnings: HashSet<String> = self.warnings.iter().cloned().collect();
+        for warning in new_warnings {
+            if existing_warnings.insert(warning.clone()) {
+                self.warnings.push(warning);
+            }
+        }
 
         // Detect cycles in message parent chain using DFS
         let mut adj: HashMap<&str, Vec<&str>> = HashMap::new();
@@ -225,10 +265,16 @@ mod tests {
     #[test]
     fn test_duplicate_block_id() {
         let mut traj = Trajectory::new("sess");
-        let msg1 = Message::new("msg-1", Role::user())
-            .with_block(Block::new("block-a", "text", Content::Text("hello".into())));
-        let msg2 = Message::new("msg-2", Role::assistant())
-            .with_block(Block::new("block-a", "text", Content::Text("world".into())));
+        let msg1 = Message::new("msg-1", Role::user()).with_block(Block::new(
+            "block-a",
+            "text",
+            Content::Text("hello".into()),
+        ));
+        let msg2 = Message::new("msg-2", Role::assistant()).with_block(Block::new(
+            "block-a",
+            "text",
+            Content::Text("world".into()),
+        ));
         traj.add_message(msg1);
         traj.add_message(msg2);
         assert!(traj.validate().is_err());
@@ -238,13 +284,30 @@ mod tests {
     fn test_temporal_violation() {
         let mut traj = Trajectory::new("sess");
         let t0 = Utc::now();
-        let t1 = t0 - TimeDelta::seconds(10);
         traj.add_message(Message::new("a", Role::user()).with_timestamp(t0));
-        traj.add_message(Message::new("b", Role::assistant()).with_timestamp(t1).with_parent("a"));
+        traj.add_message(
+            Message::new("b", Role::assistant())
+                .with_timestamp(t0 - TimeDelta::seconds(2))
+                .with_parent("a"),
+        );
         let res = traj.validate();
         assert!(res.is_err(), "expected temporal violation error");
         let err = res.unwrap_err().to_string();
         assert!(err.contains("temporal violation"));
+    }
+
+    #[test]
+    fn test_temporal_skew_within_one_second_is_tolerated() {
+        let mut traj = Trajectory::new("sess");
+        let t0 = Utc::now();
+        traj.add_message(Message::new("a", Role::user()).with_timestamp(t0));
+        traj.add_message(
+            Message::new("b", Role::assistant())
+                .with_timestamp(t0 - TimeDelta::milliseconds(999))
+                .with_parent("a"),
+        );
+
+        traj.validate().unwrap();
     }
 
     #[test]
@@ -283,7 +346,11 @@ mod tests {
     fn test_topological_with_branching() {
         let mut traj = Trajectory::new("sess");
         let t0 = Utc::now();
-        traj.add_message(Message::new("a", Role::assistant()).with_timestamp(t0).with_parent("root"));
+        traj.add_message(
+            Message::new("a", Role::assistant())
+                .with_timestamp(t0)
+                .with_parent("root"),
+        );
         traj.add_message(
             Message::new("b", Role::assistant())
                 .with_timestamp(t0 + TimeDelta::seconds(1))
@@ -310,6 +377,27 @@ mod tests {
     }
 
     #[test]
+    fn test_topological_siblings_use_earlier_timestamp_first() {
+        let mut traj = Trajectory::new("sess");
+        let t0 = Utc::now();
+        traj.add_message(Message::new("root", Role::system()).with_timestamp(t0));
+        traj.add_message(
+            Message::new("later", Role::assistant())
+                .with_timestamp(t0 + TimeDelta::seconds(2))
+                .with_parent("root"),
+        );
+        traj.add_message(
+            Message::new("earlier", Role::assistant())
+                .with_timestamp(t0 + TimeDelta::seconds(1))
+                .with_parent("root"),
+        );
+
+        let order = traj.topological_order();
+        let ids: Vec<_> = order.iter().map(|m| m.id.as_str()).collect();
+        assert_eq!(ids, vec!["root", "earlier", "later"]);
+    }
+
+    #[test]
     fn test_orphan_message() {
         let mut traj = Trajectory::new("sess");
         traj.add_message(Message::new("a", Role::user()).with_parent("missing"));
@@ -318,13 +406,55 @@ mod tests {
     }
 
     #[test]
+    fn test_validate_is_idempotent_for_orphans_and_warnings() {
+        let mut traj = Trajectory::new("sess");
+        let msg = Message::new("a", Role::user())
+            .with_parent("missing")
+            .with_block(
+                Block::new(
+                    "result-1",
+                    "tool_result",
+                    Content::ToolResult {
+                        output: "done".into(),
+                        is_error: false,
+                    },
+                )
+                .with_tool_call_id("missing-tool"),
+            );
+        traj.add_message(msg);
+
+        traj.validate().unwrap();
+        traj.validate().unwrap();
+
+        assert_eq!(traj.orphans, vec!["a".to_string()]);
+        assert_eq!(
+            traj.warnings
+                .iter()
+                .filter(|w| w.contains("orphan message"))
+                .count(),
+            1
+        );
+        assert_eq!(
+            traj.warnings
+                .iter()
+                .filter(|w| w.contains("missing-tool"))
+                .count(),
+            1
+        );
+    }
+
+    #[test]
     fn test_invalid_tool_call_id() {
         let mut traj = Trajectory::new("sess");
         let msg = Message::new("msg-1", Role::user()).with_block(
-            Block::new("result-1", "tool_result", Content::ToolResult {
-                output: "done".into(),
-                is_error: false,
-            })
+            Block::new(
+                "result-1",
+                "tool_result",
+                Content::ToolResult {
+                    output: "done".into(),
+                    is_error: false,
+                },
+            )
             .with_tool_call_id("non-existent-tool"),
         );
         traj.add_message(msg);

@@ -1,16 +1,16 @@
 [package]
-name = "llm-tracer"
+name = "traceloom"
 version = "0.1.0"
 description = "A cross-platform desktop app to visualise LLM agent message histories as DAGs"
 edition = "2021"
 rust-version = "1.80"
 
 [lib]
-name = "llm_tracer_lib"
+name = "traceloom_lib"
 path = "src/lib.rs"
 
 [[bin]]
-name = "llm-tracer"
+name = "traceloom"
 path = "src/main.rs"
 
 [dependencies]

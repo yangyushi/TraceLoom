@@ -74,7 +74,8 @@ mod tests {
 
     #[test]
     fn test_detect_openclaw() {
-        let sample = r#"{"type":"session","version":3,"id":"x","timestamp":"2026-04-12T16:14:16.691Z"}"#;
+        let sample =
+            r#"{"type":"session","version":3,"id":"x","timestamp":"2026-04-12T16:14:16.691Z"}"#;
         assert_eq!(detect_format(sample).unwrap(), SourceFormat::OpenClaw);
     }
 

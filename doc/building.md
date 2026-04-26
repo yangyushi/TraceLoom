@@ -1,200 +1,138 @@
-# Building LLM Tracer
+# Building TraceLoom
 
-This document explains how to build the LLM Tracer desktop application from source on Linux, macOS, and Windows.
+This document explains how to build TraceLoom from source on Linux, macOS, and Windows.
 
 ## Prerequisites
 
-### All Platforms
+| Tool | Version | Purpose |
+| --- | --- | --- |
+| Node.js | >= 18 | Frontend toolchain |
+| npm | >= 9 | Package manager |
+| Rust | >= 1.80 | Backend and Tauri runtime |
+| cargo | latest stable | Rust package manager |
 
-| Tool     | Version | Purpose                          | Install Link                                      |
-|----------|---------|----------------------------------|---------------------------------------------------|
-| Node.js  | >= 18   | Frontend toolchain (Vite, Svelte)| https://nodejs.org/                               |
-| npm      | >= 9    | Package manager                  | Bundled with Node.js                              |
-| Rust     | >= 1.70 | Backend / Tauri runtime          | https://rustup.rs/                                |
-| cargo    | latest  | Rust package manager             | Bundled with Rustup                               |
+## Platform Dependencies
 
-### Platform-Specific System Dependencies
-
-#### Linux (Debian/Ubuntu)
+Linux Debian/Ubuntu:
 
 ```bash
 sudo apt update
 sudo apt install libgtk-3-dev libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
 ```
 
-On older distributions the package may be `libwebkit2gtk-4.0-dev` instead of `4.1`.
-
-#### Linux (Fedora / RHEL)
+Linux Fedora/RHEL:
 
 ```bash
 sudo dnf install gtk3-devel webkit2gtk4.1-devel libappindicator-gtk3-devel librsvg2-devel patchelf
 ```
 
-#### macOS
-
-No extra system packages are required. Xcode Command Line Tools are sufficient:
+macOS requires Xcode Command Line Tools:
 
 ```bash
 xcode-select --install
 ```
 
-#### Windows
-
-Install the **Microsoft C++ Build Tools** (Visual Studio Build Tools) with the **Desktop development with C++** workload.
-
-Download: https://visualstudio.microsoft.com/visual-cpp-build-tools/
-
-You also need **WebView2 Runtime** (usually pre-installed on Windows 10/11).
+Windows requires Microsoft C++ Build Tools with the Desktop development with C++ workload. WebView2 Runtime is usually already installed on Windows 10/11.
 
 ## Quick Start
 
-### 1. Clone the repository
-
 ```bash
 git clone <repo-url>
-cd llm-tracer
-```
-
-### 2. Install frontend dependencies
-
-```bash
+cd traceloom
 npm install
 ```
 
-### 3. Build and run
-
-#### Linux / macOS
+Linux/macOS:
 
 ```bash
-make dev      # Development mode with hot reload
-make          # Release build (creates .deb / .AppImage / .dmg / .app)
-make debug    # Debug build (faster, no installer bundling)
-make test     # Run Rust unit tests
-make clean    # Remove all build artifacts
+make dev      # Development mode
+make          # Release build
+make debug    # Debug Tauri build
+make test     # Rust unit tests
 ```
 
-#### Windows
+Windows:
 
 ```powershell
-# Development mode
 .\build.ps1 -Dev
-
-# Release build
 .\build.ps1
-
-# Debug build
 .\build.ps1 -Debug
-
-# Run tests
 .\build.ps1 -Test
-
-# Clean artifacts
-.\build.ps1 -Clean
 ```
 
 ## Build Outputs
 
-After a successful release build (`make` or `.\build.ps1`), the native bundles are placed in:
+Release bundles are written to:
 
-```
+```text
 src-tauri/target/release/bundle/
 ```
 
-| Platform | Bundle formats                          |
-|----------|-----------------------------------------|
-| Linux    | `.deb`, `.rpm`, `.AppImage`             |
-| macOS    | `.dmg`, `.app`                          |
-| Windows  | `.msi`, `.nsis` (installer)             |
+Standalone binaries are written to:
 
-The standalone binary (without installer) is also available at:
-
-```
-src-tauri/target/release/llm-tracer        # Linux / macOS
-src-tauri/target/release/llm-tracer.exe    # Windows
+```text
+src-tauri/target/release/traceloom        # Linux/macOS
+src-tauri/target/release/traceloom.exe    # Windows
 ```
 
-## Development Mode
+## Development Checks
 
-Running `make dev` (Linux/macOS) or `.\build.ps1 -Dev` (Windows) starts:
-
-1. **Vite dev server** on `http://localhost:5173` — serves the Svelte frontend with hot-module replacement.
-2. **Tauri dev process** — compiles the Rust backend in debug mode and injects the Tauri API into the WebView.
-
-The app window opens automatically. Frontend changes are reflected instantly; Rust changes trigger a recompile.
-
-## Running Tests
-
-### Rust backend tests
+Run these before publishing or opening a pull request:
 
 ```bash
-# Linux / macOS
-make test
-
-# Windows
-.\build.ps1 -Test
-
-# Or directly
 cargo test --manifest-path src-tauri/Cargo.toml
+cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
+npx svelte-check --tsconfig ./tsconfig.json
+npm run build
 ```
 
-The test suite includes:
-- IR construction and serialization round-trips
-- DAG validation (cycles, temporal violations, orphans)
-- Source format detection (Claude, Codex, OpenClaw)
-- Parser correctness against all sample files in `test/samples/`
+The Rust tests cover IR validation, parser detection, fixture parsing, fail-soft orphan behavior, and content block preservation.
+
+## Tauri ACL Requirements
+
+Tauri v2 commands are denied unless whitelisted. When adding a command:
+
+1. Add a permission entry to `src-tauri/permissions/default.toml`.
+2. Add that permission identifier to `src-tauri/capabilities/default.json`.
+
+The app currently whitelists `load_trajectory`, `list_jsonl_files`, and `read_file_text`.
+
+## Generated Schemas
+
+`src-tauri/gen/schemas/*` is tracked intentionally. These files support editor validation for capabilities and permissions. Regenerate them with the Tauri CLI when Tauri configuration schema support changes:
+
+```bash
+npx tauri info
+```
 
 ## Troubleshooting
 
-### Blank page / "Could not connect to localhost"
+### Blank Page or Localhost Error
 
-**Cause:** The production app window was defaulting to the development server URL instead of the bundled frontend assets.
-
-**Fix:** Ensure `tauri.conf.json` contains an explicit `url` field in the window definition:
+The production window must load bundled frontend assets:
 
 ```json
-"app": {
-  "windows": [
-    {
-      "label": "main",
-      "url": "index.html",
-      ...
-    }
-  ]
+{
+  "label": "main",
+  "url": "index.html"
 }
 ```
 
-This is already fixed in the repository. If you still see the issue, rebuild with `make clean && make`.
+This is configured in `src-tauri/tauri.conf.json`.
 
-### `error while running tauri application: PluginInitialization("dialog", ...)`
+### Dialog Plugin Initialization Error
 
-**Cause:** The `plugins.dialog` entry in `tauri.conf.json` was an empty object `{}`, but the plugin expects no config (unit type).
+The dialog plugin is initialized in Rust code. Do not add an empty `plugins.dialog` object to `tauri.conf.json`.
 
-**Fix:** Remove the `plugins` block entirely from `tauri.conf.json` if the plugin is initialized in Rust code (which it is). This is already fixed.
+### Missing Icons
 
-### Missing icons during build
+Icons must live under `src-tauri/icons/`.
 
-**Cause:** The `icons/` directory must be located at `src-tauri/icons/`, not nested inside `src-tauri/src-tauri/icons/`.
+### WebKit Warnings on Linux
 
-**Fix:** Verify the directory structure matches:
-
-```
-src-tauri/
-  icons/
-    icon.png
-  src/
-  Cargo.toml
-  tauri.conf.json
-```
-
-### WebKit errors on Linux
-
-If you see errors about `org.a11y.Bus` or accessibility, they are harmless warnings and do not affect functionality. To suppress them:
+Warnings about `org.a11y.Bus` are usually harmless. To suppress accessibility bus warnings while running locally:
 
 ```bash
 export NO_AT_BRIDGE=1
-./src-tauri/target/release/llm-tracer
+./src-tauri/target/release/traceloom
 ```
-
-### Very slow first build
-
-Tauri compiles WebKitGTK on Linux, which can take several minutes on the first run. Subsequent builds are incremental and much faster. Use `make debug` during development to avoid the full release optimization pass.

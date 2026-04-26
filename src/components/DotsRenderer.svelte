@@ -1,7 +1,8 @@
 <script lang="ts">
-  import type { Trajectory, Message, Block } from "../types/ir";
+  import type { Trajectory, Message } from "../types/ir";
   import { getFillColor, getStrokeColor } from "../lib/colors";
-  import cytoscape from "cytoscape";
+  import { topologicalMessages } from "../lib/order";
+  import type cytoscape from "cytoscape";
   import { onDestroy } from "svelte";
 
   interface Props {
@@ -14,6 +15,7 @@
 
   let container: HTMLDivElement | null = $state(null);
   let cy: cytoscape.Core | null = null;
+  let cytoscapeFactory: typeof cytoscape | null = null;
 
   const MSG_X = 0;
   const BLOCK_X_OFFSET = 140;
@@ -21,47 +23,15 @@
   const MIN_MSG_SPACING = 100;
   const PADDING = 40;
 
-  function topologicalSort(messages: Message[]): Message[] {
-    const msgMap = new Map(messages.map((m) => [m.id, m]));
-    const inDegree = new Map<string, number>();
-    const adj = new Map<string, string[]>();
-
-    for (const m of messages) {
-      inDegree.set(m.id, 0);
+  async function loadCytoscape(): Promise<typeof cytoscape> {
+    if (!cytoscapeFactory) {
+      cytoscapeFactory = (await import("cytoscape")).default;
     }
-    for (const m of messages) {
-      if (m.parent_id && msgMap.has(m.parent_id)) {
-        adj.set(m.parent_id, [...(adj.get(m.parent_id) || []), m.id]);
-        inDegree.set(m.id, (inDegree.get(m.id) || 0) + 1);
-      }
-    }
+    return cytoscapeFactory;
+  }
 
-    const queue = messages.filter((m) => (inDegree.get(m.id) || 0) === 0);
-    const result: Message[] = [];
-    const visited = new Set<string>();
-
-    while (queue.length > 0) {
-      const msg = queue.shift()!;
-      if (visited.has(msg.id)) continue;
-      visited.add(msg.id);
-      result.push(msg);
-
-      for (const childId of adj.get(msg.id) || []) {
-        const child = msgMap.get(childId);
-        if (!child) continue;
-        const deg = (inDegree.get(childId) || 0) - 1;
-        inDegree.set(childId, deg);
-        if (deg === 0 && !visited.has(childId)) {
-          queue.push(child);
-        }
-      }
-    }
-
-    for (const m of messages) {
-      if (!visited.has(m.id)) result.push(m);
-    }
-
-    return result;
+  function sheet(selector: string, style: Record<string, unknown>): cytoscape.StylesheetJsonBlock {
+    return { selector, style } as cytoscape.StylesheetJsonBlock;
   }
 
   function buildElements(): {
@@ -70,7 +40,7 @@
     msgY: Map<string, number>;
   } {
     const elements: cytoscape.ElementDefinition[] = [];
-    const msgOrder = topologicalSort(trajectory.messages);
+    const msgOrder = topologicalMessages(trajectory.messages);
 
     // Compute message Y positions (adaptive spacing)
     let currentY = 0;
@@ -157,7 +127,7 @@
     return { elements, msgOrder, msgY };
   }
 
-  function createCy() {
+  async function createCy() {
     if (!container) return;
 
     const rect = container.getBoundingClientRect();
@@ -172,47 +142,41 @@
     }
 
     const { elements, msgOrder, msgY } = buildElements();
+    const cytoscape = await loadCytoscape();
+    if (!container) return;
 
     cy = cytoscape({
       container,
       elements,
       style: [
-        {
-          selector: "node",
-          style: {
+        sheet("node", {
             "background-color": "data(color)",
             "border-color": "data(stroke)",
             "border-width": 2,
-            width: (ele: any) => (ele.data("isMessage") ? "28px" : "16px"),
-            height: (ele: any) => (ele.data("isMessage") ? "28px" : "16px"),
+            width: (ele: cytoscape.NodeSingular) => (ele.data("isMessage") ? "28px" : "16px"),
+            height: (ele: cytoscape.NodeSingular) => (ele.data("isMessage") ? "28px" : "16px"),
             label: "data(label)",
-            "font-size": (ele: any) =>
+            "font-size": (ele: cytoscape.NodeSingular) =>
               ele.data("isMessage") ? "13px" : "10px",
             "text-valign": "bottom",
             "text-halign": "center",
             "text-margin-y": 5,
             color: "#495057",
-            "font-weight": (ele: any) =>
+            "font-weight": (ele: cytoscape.NodeSingular) =>
               ele.data("isMessage") ? "bold" : "normal",
             "text-background-color": "#f8f9fa",
             "text-background-opacity": 0.8,
             "text-background-padding": 2,
-          } as any,
-        },
-        {
-          selector: "edge[edgeType = 'chain']",
-          style: {
+        }),
+        sheet("edge[edgeType = 'chain']", {
             width: 1.5,
             "line-color": "#adb5bd",
             "target-arrow-color": "#adb5bd",
             "target-arrow-shape": "triangle",
             "curve-style": "bezier",
             "arrow-scale": 0.7,
-          } as any,
-        },
-        {
-          selector: "edge[edgeType = 'contain']",
-          style: {
+        }),
+        sheet("edge[edgeType = 'contain']", {
             width: 1,
             "line-color": "#ced4da",
             "line-style": "dashed",
@@ -220,11 +184,8 @@
             "target-arrow-shape": "triangle",
             "curve-style": "bezier",
             "arrow-scale": 0.6,
-          } as any,
-        },
-        {
-          selector: "edge[edgeType = 'tool']",
-          style: {
+        }),
+        sheet("edge[edgeType = 'tool']", {
             width: 1.5,
             "line-color": "#339af0",
             "target-arrow-color": "#339af0",
@@ -233,22 +194,18 @@
             "arrow-scale": 0.7,
             "control-point-distances": [40],
             "control-point-weights": [0.5],
-          } as any,
-        },
-        {
-          selector: ":selected",
-          style: {
+        }),
+        sheet(":selected", {
             "border-color": "#212529",
             "border-width": 3,
             "background-color": "#e7f5ff",
-          } as any,
-        },
-      ] as any,
+        }),
+      ],
       layout: {
         name: "preset",
         fit: false,
         padding: 40,
-      } as any,
+      },
       minZoom: 0.05,
       maxZoom: 3,
       wheelSensitivity: 0.3,
@@ -307,9 +264,9 @@
   $effect(() => {
     const c = container;
     const t = trajectory;
-    void t;
+      void t;
     if (c) {
-      createCy();
+      void createCy();
     }
   });
 
@@ -330,7 +287,7 @@
   function getNavigationTarget(key: string): string | null {
     if (!selectedId) return null;
 
-    const msgOrder = topologicalSort(trajectory.messages);
+    const msgOrder = topologicalMessages(trajectory.messages);
     const msgIndex = msgOrder.findIndex((m) => m.id === selectedId);
 
     if (msgIndex >= 0) {

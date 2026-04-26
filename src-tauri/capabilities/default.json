@@ -6,6 +6,7 @@
     "core:default",
     "dialog:allow-open",
     "allow-load-trajectory",
-    "allow-list-jsonl-files"
+    "allow-list-jsonl-files",
+    "allow-read-file-text"
   ]
 }

@@ -1,4 +1,4 @@
-# LLM Tracer — Build script for Windows
+# TraceLoom build script for Windows
 # Requires: Node.js, npm, Rust, cargo, Tauri CLI
 # Usage:
 #   .\build.ps1           # Release build

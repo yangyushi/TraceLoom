@@ -1,6 +1,8 @@
 <script lang="ts">
   import type { Trajectory, Message, Block } from "../types/ir";
   import { getStrokeColor } from "../lib/colors";
+  import { getBlockPreview } from "../lib/blockPreview";
+  import { orderedItems, topologicalMessages } from "../lib/order";
 
   interface Props {
     trajectory: Trajectory;
@@ -9,6 +11,7 @@
   }
 
   let { trajectory, onSelect, selectedId }: Props = $props();
+  const orderedMessages = $derived(topologicalMessages(trajectory.messages));
 
   function isMessageSelected(msg: Message): boolean {
     return selectedId === msg.id;
@@ -23,35 +26,12 @@
     return new Date(ts).toLocaleTimeString();
   }
 
-  function getBlockPreview(content: Block["content"]): string {
-    switch (content.type) {
-      case "Text":
-        return content.data.slice(0, 120) + (content.data.length > 120 ? "..." : "");
-      case "ToolUse":
-        return `Tool: ${content.data.name}`;
-      case "ToolResult":
-        return `Result: ${content.data.output.slice(0, 120)}${content.data.output.length > 120 ? "..." : ""}`;
-      case "Thinking":
-        return content.data.encrypted ? "[encrypted reasoning]" : content.data.text.slice(0, 120) + (content.data.text.length > 120 ? "..." : "");
-      case "Snapshot":
-        return content.data.description;
-      case "Custom":
-        return `[${content.data.kind}]`;
-      default:
-        return `[${(content as { type: string }).type}]`;
-    }
-  }
-
   function getNavigationTarget(key: string): string | null {
     if (!selectedId || key === "ArrowLeft" || key === "ArrowRight") return null;
 
-    const ids: string[] = [];
-    for (const msg of trajectory.messages) {
-      ids.push(msg.id);
-      for (const block of msg.blocks) {
-        ids.push(block.id);
-      }
-    }
+    const ids = orderedItems(trajectory.messages).map((item) =>
+      item.type === "message" ? item.message.id : item.block.id
+    );
 
     const idx = ids.indexOf(selectedId);
     if (idx < 0) return null;
@@ -84,7 +64,7 @@
 <svelte:window onkeydown={handleKeydown} />
 
 <div class="bricks-container">
-  {#each trajectory.messages as msg}
+  {#each orderedMessages as msg}
     <div
       class="brick message-brick"
       data-id={msg.id}
@@ -123,7 +103,7 @@
           <span class="kind">{block.kind}</span>
         </div>
         <div class="brick-preview">
-          {getBlockPreview(block.content)}
+          {getBlockPreview(block)}
         </div>
       </div>
     {/each}

@@ -4,6 +4,7 @@
   import DotsRenderer from "./components/DotsRenderer.svelte";
   import BricksRenderer from "./components/BricksRenderer.svelte";
   import NodeDetail from "./components/NodeDetail.svelte";
+  import { findOrderedItem } from "./lib/order";
 
   let trajectory = $state<Trajectory | null>(null);
   let selectedId = $state<string | null>(null);
@@ -113,13 +114,15 @@
 
   const selectedItem = $derived.by(() => {
     if (!trajectory || !selectedId) return null;
-    const msg = trajectory.messages.find((m) => m.id === selectedId);
-    if (msg) return { type: "message" as const, message: msg };
-    for (const m of trajectory.messages) {
-      const block = m.blocks.find((b) => b.id === selectedId);
-      if (block) return { type: "block" as const, message: m, block };
-    }
-    return null;
+    return findOrderedItem(trajectory, selectedId);
+  });
+
+  const parseIssues = $derived.by(() => {
+    if (!trajectory) return [];
+    return [
+      ...trajectory.warnings,
+      ...trajectory.orphans.map((id) => `orphan message: ${id}`),
+    ];
   });
 
   function onWindowClick(e: MouseEvent) {
@@ -184,6 +187,17 @@
 
   {#if error}
     <div class="error">{error}</div>
+  {/if}
+
+  {#if parseIssues.length > 0}
+    <details class="parse-issues">
+      <summary>{parseIssues.length} parser issue{parseIssues.length > 1 ? 's' : ''}</summary>
+      <ul>
+        {#each parseIssues as issue}
+          <li>{issue}</li>
+        {/each}
+      </ul>
+    </details>
   {/if}
 
   <div class="workspace">
@@ -314,6 +328,32 @@
     color: #842029;
     border-bottom: 1px solid #f5c2c7;
     flex-shrink: 0;
+  }
+
+  .parse-issues {
+    padding: 8px 16px;
+    background: #fff3bf;
+    color: #5f3f00;
+    border-bottom: 1px solid #ffe066;
+    font-size: 12px;
+    flex-shrink: 0;
+  }
+
+  .parse-issues summary {
+    cursor: pointer;
+    font-weight: 600;
+  }
+
+  .parse-issues ul {
+    margin: 8px 0 0;
+    padding-left: 18px;
+    max-height: 140px;
+    overflow: auto;
+  }
+
+  .parse-issues li {
+    margin: 3px 0;
+    word-break: break-word;
   }
 
   .workspace {

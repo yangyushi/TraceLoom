@@ -1,0 +1,6 @@
+{"type":"session","version":3,"id":"openclaw-synthetic","timestamp":"2026-01-01T00:00:00Z"}
+{"type":"message","id":"openclaw-user-1","timestamp":"2026-01-01T00:00:01Z","message":{"role":"user","content":[{"type":"text","text":"Hello"}]}}
+{"type":"message","id":"openclaw-assistant-1","parentId":"openclaw-user-1","timestamp":"2026-01-01T00:00:02Z","message":{"role":"assistant","content":[{"type":"thinking","thinking":"Plain reasoning"},{"type":"thinking","thinking":"","thinkingSignature":"ciphertext"},{"type":"toolCall","id":"openclaw-tool-1","name":"Read","arguments":{"path":"notes.md"}},{"type":"image","url":"asset://example"}]}}
+{"type":"message","id":"openclaw-tool-result-1","parentId":"openclaw-assistant-1","timestamp":"2026-01-01T00:00:03Z","message":{"role":"toolResult","toolCallId":"openclaw-tool-1","toolName":"Read","content":[{"type":"text","text":"read failed"}],"isError":true}}
+{"type":"model_change","id":"openclaw-model-1","parentId":"openclaw-tool-result-1","timestamp":"2026-01-01T00:00:04Z","model":"test-model"}
+{"type":"custom","id":"openclaw-custom-1","parentId":"openclaw-model-1","timestamp":"2026-01-01T00:00:05Z","customType":"notice","data":{"text":"synthetic custom event"}}

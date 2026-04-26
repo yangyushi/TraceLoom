@@ -1,6 +1,6 @@
-use llm_tracer_lib::ir::Trajectory;
-use llm_tracer_lib::parser;
 use std::path::Path;
+use traceloom_lib::ir::Trajectory;
+use traceloom_lib::parser;
 
 #[tauri::command]
 fn load_trajectory(path: String) -> Result<Trajectory, String> {
@@ -41,7 +41,11 @@ fn list_jsonl_files(folder: String) -> Result<Vec<String>, String> {
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
-        .invoke_handler(tauri::generate_handler![load_trajectory, list_jsonl_files, read_file_text])
+        .invoke_handler(tauri::generate_handler![
+            load_trajectory,
+            list_jsonl_files,
+            read_file_text
+        ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

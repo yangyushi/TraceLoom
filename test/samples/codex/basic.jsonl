@@ -1,0 +1,8 @@
+{"timestamp":"2026-01-01T00:00:00Z","type":"session_meta","payload":{"id":"codex-synthetic","timestamp":"2026-01-01T00:00:00Z","originator":"test"}}
+{"timestamp":"2026-01-01T00:00:01Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"Inspect this trace."}]}}
+{"timestamp":"2026-01-01T00:00:02Z","type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"reasoning","encrypted_content":"ciphertext"},{"type":"output_text","text":"I will call a tool."},{"type":"input_image","image_url":"asset://example"}]}}
+{"timestamp":"2026-01-01T00:00:03Z","type":"response_item","payload":{"type":"function_call","call_id":"codex-call-1","name":"read_file","arguments":"{\"path\":\"notes.md\"}"}}
+{"timestamp":"2026-01-01T00:00:04Z","type":"response_item","payload":{"type":"function_call_output","call_id":"codex-call-1","output":"contents"}}
+{"timestamp":"2026-01-01T00:00:05Z","type":"response_item","payload":{"type":"custom_tool_call","call_id":"codex-custom-1","name":"shell","input":"echo hi"}}
+{"timestamp":"2026-01-01T00:00:06Z","type":"response_item","payload":{"type":"custom_tool_call_output","call_id":"codex-custom-1","output":"hi"}}
+{"timestamp":"2026-01-01T00:00:07Z","type":"event_msg","payload":{"type":"agent_reasoning","turn_id":"t1","text":"visible event reasoning"}}
