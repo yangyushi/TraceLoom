@@ -19,3 +19,4 @@ pnpm-debug.log*
 
 test/**/out.jsonl
 test/**/pretty_jsonl.py
+src-tauri/gen/schemas/*.json

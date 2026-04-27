@@ -221,7 +221,7 @@
       <div class="resize-handle" onmousedown={startResizeLeft} role="separator" tabindex="-1" aria-label="Resize file list"></div>
     {/if}
 
-    <div class="canvas">
+    <div class="canvas" class:dots-canvas={theme === "dots"} class:bricks-canvas={theme === "bricks"}>
       {#if trajectory}
         {#if theme === "dots"}
           <DotsRenderer {trajectory} onSelect={handleSelect} {selectedId} />
@@ -261,19 +261,26 @@
 </main>
 
 <style>
+  :global(html),
+  :global(body),
+  :global(#app) {
+    height: 100%;
+    overflow: hidden;
+  }
+
   :global(body) {
     margin: 0;
     font-family: system-ui, -apple-system, sans-serif;
     background: #f8f9fa;
     color: #212529;
-    height: 100vh;
-    overflow: hidden;
   }
 
   .app {
     display: flex;
     flex-direction: column;
-    height: 100vh;
+    height: 100%;
+    min-height: 0;
+    overflow: hidden;
   }
 
   .toolbar {
@@ -360,6 +367,8 @@
     display: flex;
     flex: 1;
     overflow: hidden;
+    min-width: 0;
+    min-height: 0;
   }
 
   .file-list {
@@ -452,9 +461,19 @@
 
   .canvas {
     flex: 1;
-    overflow: auto;
     position: relative;
     background: #f8f9fa;
+    min-width: 0;
+    min-height: 0;
+    overflow: hidden;
+  }
+
+  .canvas.bricks-canvas {
+    overflow: auto;
+  }
+
+  .canvas.dots-canvas {
+    overflow: hidden;
   }
 
   .placeholder {
@@ -471,6 +490,8 @@
     background: #ffffff;
     overflow: auto;
     flex-shrink: 0;
+    min-width: 0;
+    min-height: 0;
   }
 
   .context-menu-overlay {
