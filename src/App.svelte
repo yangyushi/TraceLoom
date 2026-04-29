@@ -6,6 +6,7 @@
     readFileText,
     exportWorkspace,
     importWorkspace,
+    pickJsonlFile,
     pickWorkspaceFile,
     pickSavePath,
     addRecentWorkspace,
@@ -136,14 +137,8 @@
     if (!workspaceState) return;
     error = null;
     try {
-      const { open } = await import("@tauri-apps/plugin-dialog");
-      const file = await open({
-        multiple: false,
-        directory: false,
-        filters: [{ name: "JSONL", extensions: ["jsonl"] }],
-      });
-      if (!file) return;
-      const path = Array.isArray(file) ? file[0] : file;
+      const path = await pickJsonlFile();
+      if (!path) return;
       const newSource = createSource(path);
       workspaceState.sources = [...workspaceState.sources, newSource];
       hasUnsavedChanges = true;
@@ -177,12 +172,9 @@
   function handleRemoveSource(sourceId: number) {
     if (!workspaceState) return;
     workspaceState.sources = workspaceState.sources.filter((s) => s.id !== sourceId);
-    // Clean up annotations and bookmarks for removed source
     workspaceState.annotations = workspaceState.annotations.filter((a) => a.trajectory_source_id !== sourceId);
-    workspaceState.bookmarks = workspaceState.bookmarks.filter((b) => {
-      const ann = workspaceState!.annotations.find((a) => a.id === b.annotation_id);
-      return ann != null;
-    });
+    const annotationIds = new Set(workspaceState.annotations.map((a) => a.id));
+    workspaceState.bookmarks = workspaceState.bookmarks.filter((b) => annotationIds.has(b.annotation_id));
     if (selectedSourceId === sourceId) {
       selectedSourceId = null;
       selectedRenderId = null;
@@ -361,9 +353,7 @@
   }
 
   async function hydrateWorkspace(file: WorkspaceFile, filePath: string | null): Promise<WorkspaceState> {
-    const sources: TrajectorySource[] = [];
-    for (let i = 0; i < file.sources.length; i++) {
-      const fs = file.sources[i];
+    const sources = await Promise.all(file.sources.map(async (fs, i): Promise<TrajectorySource> => {
       let trajectory = null;
       if (fs.visibility_state === "loaded") {
         try {
@@ -372,7 +362,7 @@
           console.error("Failed to load trajectory:", fs.file_path, e);
         }
       }
-      sources.push({
+      return {
         id: i + 1,
         display_name: fs.display_name,
         source_type: "imported_file",
@@ -381,8 +371,8 @@
         color_key: fs.color_key,
         sort_order: fs.sort_order,
         visibility_state: fs.visibility_state,
-      });
-    }
+      };
+    }));
 
     const annotations: Annotation[] = [];
     for (let i = 0; i < file.annotations.length; i++) {

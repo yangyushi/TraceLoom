@@ -12,6 +12,16 @@ export async function pickFolder(): Promise<string | null> {
   return Array.isArray(folder) ? folder[0] : folder;
 }
 
+export async function pickJsonlFile(): Promise<string | null> {
+  const file = await open({
+    multiple: false,
+    directory: false,
+    filters: [{ name: "JSONL", extensions: ["jsonl"] }],
+  });
+  if (!file) return null;
+  return Array.isArray(file) ? file[0] : file;
+}
+
 export async function listJsonlFiles(folder: string): Promise<string[]> {
   return invoke<string[]>("list_jsonl_files", { folder });
 }

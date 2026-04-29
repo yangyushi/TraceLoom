@@ -31,10 +31,14 @@
   const INITIAL_ZOOM = 1;
 
   interface NavigationRow {
-    sourceIndex: number;
-    msgIndex: number;
     messageId: string;
     blockIds: string[];
+  }
+
+  interface NavigationIndex {
+    rows: NavigationRow[];
+    rowByRenderId: Map<string, number>;
+    blockByRenderId: Map<string, { rowIndex: number; blockIndex: number }>;
   }
 
   const renderSignature = $derived.by(() =>
@@ -52,23 +56,33 @@
       .join(";")
   );
 
-  const navigationRows = $derived.by(() => {
+  const navigationIndex = $derived.by((): NavigationIndex => {
     const rows: NavigationRow[] = [];
+    const rowByRenderId = new Map<string, number>();
+    const blockByRenderId = new Map<string, { rowIndex: number; blockIndex: number }>();
+
     for (let si = 0; si < sources.length; si++) {
       const traj = sources[si].trajectory;
       if (!traj) continue;
       const msgOrder = topologicalMessages(traj.messages);
-      for (let mi = 0; mi < msgOrder.length; mi++) {
-        const msg = msgOrder[mi];
+      for (const msg of msgOrder) {
+        const rowIndex = rows.length;
+        const messageId = namespaceId(sources[si].id, msg.id);
+        const blockIds = msg.blocks.map((block) => namespaceId(sources[si].id, block.id));
         rows.push({
-          sourceIndex: si,
-          msgIndex: mi,
-          messageId: namespaceId(sources[si].id, msg.id),
-          blockIds: msg.blocks.map((block) => namespaceId(sources[si].id, block.id)),
+          messageId,
+          blockIds,
         });
+        rowByRenderId.set(messageId, rowIndex);
+        for (let blockIndex = 0; blockIndex < blockIds.length; blockIndex++) {
+          const blockId = blockIds[blockIndex];
+          rowByRenderId.set(blockId, rowIndex);
+          blockByRenderId.set(blockId, { rowIndex, blockIndex });
+        }
       }
     }
-    return rows;
+
+    return { rows, rowByRenderId, blockByRenderId };
   });
 
   async function loadCytoscape(): Promise<typeof cytoscape> {
@@ -411,41 +425,27 @@
     previousSelectedRenderId = null;
   });
 
-  function getAllItems(): { renderId: string; sourceIndex: number; msgIndex: number; isBlock: boolean; blockIndex: number }[] {
-    const items: { renderId: string; sourceIndex: number; msgIndex: number; isBlock: boolean; blockIndex: number }[] = [];
-    for (let si = 0; si < sources.length; si++) {
-      const traj = sources[si].trajectory;
-      if (!traj) continue;
-      const msgOrder = topologicalMessages(traj.messages);
-      for (let mi = 0; mi < msgOrder.length; mi++) {
-        const msg = msgOrder[mi];
-        items.push({ renderId: namespaceId(sources[si].id, msg.id), sourceIndex: si, msgIndex: mi, isBlock: false, blockIndex: -1 });
-        for (let bi = 0; bi < msg.blocks.length; bi++) {
-          items.push({ renderId: namespaceId(sources[si].id, msg.blocks[bi].id), sourceIndex: si, msgIndex: mi, isBlock: true, blockIndex: bi });
-        }
-      }
-    }
-    return items;
-  }
-
   function getNavigationTarget(key: string): string | null {
     if (!selectedRenderId) return null;
 
-    const rows = navigationRows;
-    const rowIndex = rows.findIndex((row) =>
-      row.messageId === selectedRenderId || row.blockIds.includes(selectedRenderId)
-    );
+    const { rows, rowByRenderId, blockByRenderId } = navigationIndex;
+    const rowIndex = rowByRenderId.get(selectedRenderId) ?? -1;
     if (rowIndex < 0) return null;
 
     const row = rows[rowIndex];
     const isMessage = row.messageId === selectedRenderId;
-    const isBlock = row.blockIds.includes(selectedRenderId);
+    const blockPosition = blockByRenderId.get(selectedRenderId);
 
     switch (key) {
       case "ArrowLeft":
-        return isBlock ? row.messageId : null;
+        if (!blockPosition) return null;
+        return blockPosition.blockIndex > 0
+          ? row.blockIds[blockPosition.blockIndex - 1]
+          : row.messageId;
       case "ArrowRight":
-        return isMessage ? row.blockIds[0] ?? null : null;
+        if (isMessage) return row.blockIds[0] ?? null;
+        if (!blockPosition) return null;
+        return row.blockIds[blockPosition.blockIndex + 1] ?? null;
       case "ArrowUp":
         return rows[rowIndex - 1]?.messageId ?? null;
       case "ArrowDown":
@@ -454,15 +454,23 @@
     return null;
   }
 
+  function isEditableTarget(target: HTMLElement): boolean {
+    return target.tagName === "INPUT" || target.tagName === "TEXTAREA" || target.isContentEditable;
+  }
+
+  function isGraphKeyTarget(target: HTMLElement): boolean {
+    if (isEditableTarget(target)) return false;
+    if (target === document.body || target === document.documentElement) return true;
+    return container?.contains(target) ?? false;
+  }
+
   function handleKeydown(e: KeyboardEvent) {
     if (!["ArrowRight", "ArrowLeft", "ArrowUp", "ArrowDown"].includes(e.key)) return;
     const target = e.target as HTMLElement;
-    if (target.tagName === "INPUT" || target.tagName === "TEXTAREA" || target.isContentEditable) {
-      return;
-    }
-    e.preventDefault();
+    if (!isGraphKeyTarget(target)) return;
     const nextId = getNavigationTarget(e.key);
     if (nextId) {
+      e.preventDefault();
       onSelect(nextId);
     }
   }

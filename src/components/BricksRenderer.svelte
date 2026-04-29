@@ -1,9 +1,9 @@
 <script lang="ts">
   import type { TrajectorySource, RenderId } from "../types/workspace";
-  import { namespaceId, parseRenderId } from "../lib/workspace";
+  import { namespaceId } from "../lib/workspace";
   import { getStrokeColor, getSourceColor } from "../lib/colors";
   import { getBlockPreview } from "../lib/blockPreview";
-  import { orderedItems, topologicalMessages } from "../lib/order";
+  import { topologicalMessages } from "../lib/order";
 
   interface Props {
     source: TrajectorySource;
@@ -14,7 +14,53 @@
 
   let { source, onSelect, selectedRenderId, onQuickAddBookmark }: Props = $props();
 
+  let container: HTMLDivElement | null = $state(null);
   let nodeContextMenu = $state<{ x: number; y: number; renderId: string } | null>(null);
+
+  interface BrickBlock {
+    id: string;
+    kind: string;
+    renderId: string;
+    borderColor: string;
+    preview: string;
+  }
+
+  interface BrickRow {
+    id: string;
+    role: string;
+    renderId: string;
+    timestamp: string;
+    blockCount: number;
+    isSidechain: boolean;
+    borderColor: string;
+    blocks: BrickBlock[];
+  }
+
+  const rows = $derived.by((): BrickRow[] => {
+    const trajectory = source.trajectory;
+    if (!trajectory) return [];
+
+    return topologicalMessages(trajectory.messages).map((msg) => ({
+      id: msg.id,
+      role: msg.role,
+      renderId: namespaceId(source.id, msg.id),
+      timestamp: formatTimestamp(msg.timestamp),
+      blockCount: msg.blocks.length,
+      isSidechain: msg.is_sidechain,
+      borderColor: getStrokeColor(msg.role),
+      blocks: msg.blocks.map((block) => ({
+        id: block.id,
+        kind: block.kind,
+        renderId: namespaceId(source.id, block.id),
+        borderColor: getStrokeColor(block.kind),
+        preview: getBlockPreview(block),
+      })),
+    }));
+  });
+
+  const navigationIds = $derived.by(() =>
+    rows.flatMap((row) => [row.renderId, ...row.blocks.map((block) => block.renderId)])
+  );
 
   function handleContextMenu(e: MouseEvent, renderId: string) {
     e.preventDefault();
@@ -25,32 +71,15 @@
     nodeContextMenu = null;
   }
 
-  function isMessageSelected(msgId: string): boolean {
-    return selectedRenderId === namespaceId(source.id, msgId);
-  }
-
-  function isBlockSelected(blockId: string): boolean {
-    return selectedRenderId === namespaceId(source.id, blockId);
-  }
-
   function formatTimestamp(ts: string | null): string {
     if (!ts) return "";
     return new Date(ts).toLocaleTimeString();
   }
 
-  function getAllRenderIds(): string[] {
-    if (!source.trajectory) return [];
-    const ids: string[] = [];
-    for (const item of orderedItems(source.trajectory.messages)) {
-      ids.push(namespaceId(source.id, item.type === "message" ? item.message.id : item.block.id));
-    }
-    return ids;
-  }
-
   function getNavigationTarget(key: string): string | null {
     if (!selectedRenderId || key === "ArrowLeft" || key === "ArrowRight") return null;
 
-    const ids = getAllRenderIds();
+    const ids = navigationIds;
     const idx = ids.indexOf(selectedRenderId);
     if (idx < 0) return null;
 
@@ -59,15 +88,23 @@
     return null;
   }
 
+  function isEditableTarget(target: HTMLElement): boolean {
+    return target.tagName === "INPUT" || target.tagName === "TEXTAREA" || target.isContentEditable;
+  }
+
+  function isBricksKeyTarget(target: HTMLElement): boolean {
+    if (isEditableTarget(target)) return false;
+    if (target === document.body || target === document.documentElement) return true;
+    return container?.contains(target) ?? false;
+  }
+
   function handleKeydown(e: KeyboardEvent) {
     if (!["ArrowUp", "ArrowDown"].includes(e.key)) return;
     const target = e.target as HTMLElement;
-    if (target.tagName === "INPUT" || target.tagName === "TEXTAREA" || target.isContentEditable) {
-      return;
-    }
-    e.preventDefault();
+    if (!isBricksKeyTarget(target)) return;
     const nextId = getNavigationTarget(e.key);
     if (nextId) {
+      e.preventDefault();
       onSelect(nextId);
       requestAnimationFrame(() => {
         const el = document.querySelector(`[data-render-id="${nextId}"]`);
@@ -81,7 +118,7 @@
 
 <svelte:window onkeydown={handleKeydown} />
 
-<div class="bricks-container">
+<div class="bricks-container" bind:this={container}>
   {#if source.trajectory}
     <div class="source-section">
       <div class="source-header" style="border-left-color: {getSourceColor(source.color_key)};">
@@ -89,48 +126,48 @@
         <span class="source-meta">{source.trajectory.messages.length} messages</span>
       </div>
 
-      {#each topologicalMessages(source.trajectory.messages) as msg}
+      {#each rows as row (row.renderId)}
         <div
           class="brick message-brick"
-          data-render-id={namespaceId(source.id, msg.id)}
-          class:selected={isMessageSelected(msg.id)}
-          class:sidechain={msg.is_sidechain}
-          style="border-left-color: {getStrokeColor(msg.role)};"
-          onclick={() => onSelect(namespaceId(source.id, msg.id))}
+          data-render-id={row.renderId}
+          class:selected={selectedRenderId === row.renderId}
+          class:sidechain={row.isSidechain}
+          style="border-left-color: {row.borderColor};"
+          onclick={() => onSelect(row.renderId)}
           role="button"
           tabindex="0"
-          onkeydown={(e) => e.key === "Enter" && onSelect(namespaceId(source.id, msg.id))}
-          oncontextmenu={(e) => handleContextMenu(e, namespaceId(source.id, msg.id))}
+          onkeydown={(e) => e.key === "Enter" && onSelect(row.renderId)}
+          oncontextmenu={(e) => handleContextMenu(e, row.renderId)}
         >
           <div class="brick-header">
-            <span class="kind">{msg.role}</span>
-            {#if msg.timestamp}
-              <span class="time">{formatTimestamp(msg.timestamp)}</span>
+            <span class="kind">{row.role}</span>
+            {#if row.timestamp}
+              <span class="time">{row.timestamp}</span>
             {/if}
           </div>
-          {#if msg.blocks.length > 0}
-            <div class="brick-meta">{msg.blocks.length} block{msg.blocks.length > 1 ? 's' : ''}</div>
+          {#if row.blockCount > 0}
+            <div class="brick-meta">{row.blockCount} block{row.blockCount > 1 ? 's' : ''}</div>
           {/if}
         </div>
 
-        {#each msg.blocks as block}
+        {#each row.blocks as block (block.renderId)}
           <div
             class="brick block-brick"
-            data-render-id={namespaceId(source.id, block.id)}
-            class:selected={isBlockSelected(block.id)}
-            class:sidechain={msg.is_sidechain}
-            style="border-left-color: {getStrokeColor(block.kind)}; margin-left: 24px;"
-            onclick={() => onSelect(namespaceId(source.id, block.id))}
+            data-render-id={block.renderId}
+            class:selected={selectedRenderId === block.renderId}
+            class:sidechain={row.isSidechain}
+            style="border-left-color: {block.borderColor}; margin-left: 24px;"
+            onclick={() => onSelect(block.renderId)}
             role="button"
             tabindex="0"
-            onkeydown={(e) => e.key === "Enter" && onSelect(namespaceId(source.id, block.id))}
-            oncontextmenu={(e) => handleContextMenu(e, namespaceId(source.id, block.id))}
+            onkeydown={(e) => e.key === "Enter" && onSelect(block.renderId)}
+            oncontextmenu={(e) => handleContextMenu(e, block.renderId)}
           >
             <div class="brick-header">
               <span class="kind">{block.kind}</span>
             </div>
             <div class="brick-preview">
-              {getBlockPreview(block)}
+              {block.preview}
             </div>
           </div>
         {/each}
