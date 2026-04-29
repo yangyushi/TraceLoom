@@ -5,8 +5,14 @@
   "permissions": [
     "core:default",
     "dialog:allow-open",
+    "dialog:allow-save",
     "allow-load-trajectory",
     "allow-list-jsonl-files",
-    "allow-read-file-text"
+    "allow-read-file-text",
+    "allow-export-workspace",
+    "allow-import-workspace",
+    "allow-list-recent-workspaces",
+    "allow-add-recent-workspace",
+    "allow-remove-recent-workspace"
   ]
 }

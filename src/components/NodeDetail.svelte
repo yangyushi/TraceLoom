@@ -1,5 +1,6 @@
 <script lang="ts">
   import type { Message, Block } from "../types/ir";
+  import type { Bookmark } from "../types/workspace";
   import { getBlockRawText } from "../lib/blockPreview";
 
   interface MessageItem {
@@ -16,9 +17,27 @@
   interface Props {
     item: MessageItem | BlockItem | null;
     onClose: () => void;
+    nodeId: string | null;
+    bookmarks: Bookmark[];
+    onAddBookmark: (comment: string) => void;
+    onRemoveBookmark: (id: number) => void;
   }
 
-  let { item, onClose }: Props = $props();
+  let { item, onClose, nodeId, bookmarks, onAddBookmark, onRemoveBookmark }: Props = $props();
+
+  let showBookmarkForm = $state(false);
+  let bookmarkComment = $state("");
+
+  const existingBookmark = $derived.by(() => {
+    if (!nodeId) return null;
+    return bookmarks.find((b) => b.node_id === nodeId) ?? null;
+  });
+
+  function handleAddBookmark() {
+    onAddBookmark(bookmarkComment);
+    bookmarkComment = "";
+    showBookmarkForm = false;
+  }
   let showMarkdown = $state(false);
   let showItems = $state(false);
   let rendererVersion = $state(0);
@@ -294,8 +313,39 @@
     {@const msg = item.message}
     <div class="detail-header">
       <h3>{msg.role}</h3>
-      <button class="close-btn" onclick={onClose}>&times;</button>
+      <div class="header-actions">
+        {#if existingBookmark}
+          <button class="bookmark-btn active" onclick={() => onRemoveBookmark(existingBookmark.id)} title="Remove bookmark">
+            ★
+          </button>
+        {:else}
+          <button class="bookmark-btn" onclick={() => showBookmarkForm = !showBookmarkForm} title="Add bookmark">
+            ☆
+          </button>
+        {/if}
+        <button class="close-btn" onclick={onClose}>&times;</button>
+      </div>
     </div>
+
+    {#if showBookmarkForm}
+      <div class="bookmark-form">
+        <textarea
+          placeholder="Add a comment (optional)..."
+          bind:value={bookmarkComment}
+          rows={2}
+        ></textarea>
+        <div class="bookmark-form-actions">
+          <button onclick={handleAddBookmark}>Add Bookmark</button>
+          <button onclick={() => { showBookmarkForm = false; bookmarkComment = ""; }}>Cancel</button>
+        </div>
+      </div>
+    {/if}
+
+    {#if existingBookmark?.comment}
+      <div class="bookmark-comment">
+        <strong>Bookmark:</strong> {existingBookmark.comment}
+      </div>
+    {/if}
 
     <div class="detail-meta">
       <div><strong>ID:</strong> {msg.id}</div>
@@ -341,8 +391,39 @@
     {@const msg = item.message}
     <div class="detail-header">
       <h3>{block.kind}</h3>
-      <button class="close-btn" onclick={onClose}>&times;</button>
+      <div class="header-actions">
+        {#if existingBookmark}
+          <button class="bookmark-btn active" onclick={() => onRemoveBookmark(existingBookmark.id)} title="Remove bookmark">
+            ★
+          </button>
+        {:else}
+          <button class="bookmark-btn" onclick={() => showBookmarkForm = !showBookmarkForm} title="Add bookmark">
+            ☆
+          </button>
+        {/if}
+        <button class="close-btn" onclick={onClose}>&times;</button>
+      </div>
     </div>
+
+    {#if showBookmarkForm}
+      <div class="bookmark-form">
+        <textarea
+          placeholder="Add a comment (optional)..."
+          bind:value={bookmarkComment}
+          rows={2}
+        ></textarea>
+        <div class="bookmark-form-actions">
+          <button onclick={handleAddBookmark}>Add Bookmark</button>
+          <button onclick={() => { showBookmarkForm = false; bookmarkComment = ""; }}>Cancel</button>
+        </div>
+      </div>
+    {/if}
+
+    {#if existingBookmark?.comment}
+      <div class="bookmark-comment">
+        <strong>Bookmark:</strong> {existingBookmark.comment}
+      </div>
+    {/if}
 
     <div class="detail-meta">
       <div><strong>ID:</strong> {block.id}</div>
@@ -629,5 +710,77 @@
     border-radius: 4px;
     overflow: auto;
     font-size: 12px;
+  }
+
+  .header-actions {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+
+  .bookmark-btn {
+    background: none;
+    border: none;
+    font-size: 18px;
+    cursor: pointer;
+    color: #adb5bd;
+    line-height: 1;
+    padding: 0;
+  }
+
+  .bookmark-btn:hover {
+    color: #f59f00;
+  }
+
+  .bookmark-btn.active {
+    color: #f59f00;
+  }
+
+  .bookmark-form {
+    margin-bottom: 12px;
+    padding: 8px;
+    background: #fff9db;
+    border: 1px solid #ffe066;
+    border-radius: 6px;
+  }
+
+  .bookmark-form textarea {
+    width: 100%;
+    border: 1px solid #dee2e6;
+    border-radius: 4px;
+    padding: 6px;
+    font-size: 12px;
+    resize: vertical;
+  }
+
+  .bookmark-form-actions {
+    display: flex;
+    gap: 6px;
+    margin-top: 6px;
+  }
+
+  .bookmark-form-actions button {
+    background: #f1f3f5;
+    border: 1px solid #ced4da;
+    border-radius: 4px;
+    padding: 4px 10px;
+    cursor: pointer;
+    font-size: 12px;
+  }
+
+  .bookmark-form-actions button:first-child {
+    background: #1864ab;
+    color: #fff;
+    border-color: #1864ab;
+  }
+
+  .bookmark-comment {
+    font-size: 12px;
+    color: #5f3f00;
+    background: #fff3bf;
+    padding: 8px 10px;
+    border-radius: 4px;
+    margin-bottom: 12px;
+    border: 1px solid #ffe066;
   }
 </style>
