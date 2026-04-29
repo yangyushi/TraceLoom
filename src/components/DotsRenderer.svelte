@@ -1,10 +1,10 @@
 <script lang="ts">
   import type { TrajectorySource, RenderId } from "../types/workspace";
-  import { namespaceId, parseRenderId } from "../lib/workspace";
+  import { namespaceId } from "../lib/workspace";
   import { getFillColor, getStrokeColor, getSourceColor } from "../lib/colors";
   import { topologicalMessages } from "../lib/order";
   import type cytoscape from "cytoscape";
-  import { onDestroy } from "svelte";
+  import { onDestroy, untrack } from "svelte";
 
   interface Props {
     sources: TrajectorySource[];
@@ -18,6 +18,8 @@
   let container: HTMLDivElement | null = $state(null);
   let cy: cytoscape.Core | null = null;
   let cytoscapeFactory: typeof cytoscape | null = null;
+  let resizeObserver: ResizeObserver | null = null;
+  let previousSelectedRenderId: RenderId | null = null;
   let nodeContextMenu = $state<{ x: number; y: number; renderId: string } | null>(null);
 
   const MSG_X = 0;
@@ -26,6 +28,48 @@
   const MIN_MSG_SPACING = 100;
   const PADDING = 40;
   const LANE_WIDTH = 400;
+  const INITIAL_ZOOM = 1;
+
+  interface NavigationRow {
+    sourceIndex: number;
+    msgIndex: number;
+    messageId: string;
+    blockIds: string[];
+  }
+
+  const renderSignature = $derived.by(() =>
+    sources
+      .map((source) => {
+        const trajectory = source.trajectory;
+        return [
+          source.id,
+          source.visibility_state,
+          source.display_name,
+          trajectory?.messages.length ?? 0,
+          trajectory?.messages.map((msg) => `${msg.id}:${msg.blocks.length}`).join(",") ?? "",
+        ].join("|");
+      })
+      .join(";")
+  );
+
+  const navigationRows = $derived.by(() => {
+    const rows: NavigationRow[] = [];
+    for (let si = 0; si < sources.length; si++) {
+      const traj = sources[si].trajectory;
+      if (!traj) continue;
+      const msgOrder = topologicalMessages(traj.messages);
+      for (let mi = 0; mi < msgOrder.length; mi++) {
+        const msg = msgOrder[mi];
+        rows.push({
+          sourceIndex: si,
+          msgIndex: mi,
+          messageId: namespaceId(sources[si].id, msg.id),
+          blockIds: msg.blocks.map((block) => namespaceId(sources[si].id, block.id)),
+        });
+      }
+    }
+    return rows;
+  });
 
   async function loadCytoscape(): Promise<typeof cytoscape> {
     if (!cytoscapeFactory) {
@@ -160,16 +204,13 @@
       cy.destroy();
       cy = null;
     }
+    previousSelectedRenderId = null;
 
     const allElements: cytoscape.ElementDefinition[] = [];
-    let maxY = 0;
 
     for (let i = 0; i < sources.length; i++) {
-      const { elements, msgOrder } = buildSourceElements(sources[i], i);
+      const { elements } = buildSourceElements(sources[i], i);
       allElements.push(...elements);
-      for (const m of msgOrder) {
-        maxY = Math.max(maxY, m.y);
-      }
     }
 
     const cytoscape = await loadCytoscape();
@@ -253,11 +294,10 @@
       autoungrabify: true,
     });
 
-    // Fit to content
+    // Keep message nodes at a fixed rendered size on import/load.
     if (allElements.length > 0) {
-      const zoom = Math.min(3, Math.max(0.05, rect.height / (maxY + MIN_MSG_SPACING)));
-      cy.zoom(zoom);
-      cy.center();
+      cy.zoom(INITIAL_ZOOM);
+      cy.pan({ x: Math.max(PADDING, rect.width / 2 - BLOCK_X_OFFSET), y: PADDING + 40 });
     }
 
     cy.on("tap", "node", (evt: cytoscape.EventObjectNode) => {
@@ -296,16 +336,30 @@
         nodeContextMenu = null;
       }
     });
+
+    updateSelection();
   }
 
   function updateSelection() {
     if (!cy) return;
-    cy.nodes().unselect();
     const id = selectedRenderId;
+    if (id === previousSelectedRenderId) return;
+
+    const previousId = previousSelectedRenderId;
+    previousSelectedRenderId = id;
+
+    if (previousId) {
+      const previous = cy.getElementById(previousId);
+      if (previous.length > 0) {
+        previous.unselect();
+      }
+    }
+
     if (id) {
       const ele = cy.getElementById(id);
       if (ele.length > 0) {
         ele.select();
+        cy.stop(false, true);
         cy.animate(
           {
             center: { eles: ele },
@@ -319,11 +373,27 @@
 
   $effect(() => {
     const c = container;
-    const s = sources;
-    void s;
+    const signature = renderSignature;
+    void signature;
     if (c) {
-      void createCy();
+      void untrack(createCy);
     }
+  });
+
+  $effect(() => {
+    const c = container;
+    if (!c) return;
+
+    resizeObserver?.disconnect();
+    resizeObserver = new ResizeObserver(() => {
+      cy?.resize();
+    });
+    resizeObserver.observe(c);
+
+    return () => {
+      resizeObserver?.disconnect();
+      resizeObserver = null;
+    };
   });
 
   $effect(() => {
@@ -333,10 +403,12 @@
   });
 
   onDestroy(() => {
+    resizeObserver?.disconnect();
     if (cy) {
       cy.destroy();
       cy = null;
     }
+    previousSelectedRenderId = null;
   });
 
   function getAllItems(): { renderId: string; sourceIndex: number; msgIndex: number; isBlock: boolean; blockIndex: number }[] {
@@ -359,38 +431,25 @@
   function getNavigationTarget(key: string): string | null {
     if (!selectedRenderId) return null;
 
-    const allItems = getAllItems();
-    const idx = allItems.findIndex((item) => item.renderId === selectedRenderId);
-    if (idx < 0) return null;
+    const rows = navigationRows;
+    const rowIndex = rows.findIndex((row) =>
+      row.messageId === selectedRenderId || row.blockIds.includes(selectedRenderId)
+    );
+    if (rowIndex < 0) return null;
 
-    const current = allItems[idx];
+    const row = rows[rowIndex];
+    const isMessage = row.messageId === selectedRenderId;
+    const isBlock = row.blockIds.includes(selectedRenderId);
 
     switch (key) {
-      case "ArrowRight": {
-        const trajR = sources[current.sourceIndex].trajectory;
-        if (!trajR) return null;
-        if (!current.isBlock) {
-          const msg = topologicalMessages(trajR.messages)[current.msgIndex];
-          return msg.blocks[0] ? namespaceId(sources[current.sourceIndex].id, msg.blocks[0].id) : null;
-        }
-        const msg = topologicalMessages(trajR.messages)[current.msgIndex];
-        return msg.blocks[current.blockIndex + 1] ? namespaceId(sources[current.sourceIndex].id, msg.blocks[current.blockIndex + 1].id) : null;
-      }
-      case "ArrowLeft": {
-        if (!current.isBlock) return null;
-        const trajL = sources[current.sourceIndex].trajectory;
-        if (!trajL) return null;
-        if (current.blockIndex === 0) {
-          const msg = topologicalMessages(trajL.messages)[current.msgIndex];
-          return namespaceId(sources[current.sourceIndex].id, msg.id);
-        }
-        const msg = topologicalMessages(trajL.messages)[current.msgIndex];
-        return namespaceId(sources[current.sourceIndex].id, msg.blocks[current.blockIndex - 1].id);
-      }
+      case "ArrowLeft":
+        return isBlock ? row.messageId : null;
+      case "ArrowRight":
+        return isMessage ? row.blockIds[0] ?? null : null;
       case "ArrowUp":
-        return allItems[idx - 1]?.renderId ?? null;
+        return rows[rowIndex - 1]?.messageId ?? null;
       case "ArrowDown":
-        return allItems[idx + 1]?.renderId ?? null;
+        return rows[rowIndex + 1]?.messageId ?? null;
     }
     return null;
   }

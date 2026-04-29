@@ -11,7 +11,7 @@
     addRecentWorkspace,
   } from "./lib/api";
   import type { WorkspaceState, TrajectorySource, Annotation, Bookmark, RenderId, WorkspaceFile, WorkspaceFileSource, WorkspaceFileAnnotation, WorkspaceFileBookmark } from "./types/workspace";
-  import { parseRenderId, findSourceById, namespaceId } from "./lib/workspace";
+  import { parseRenderId, findSourceById } from "./lib/workspace";
   import { findOrderedItem } from "./lib/order";
   import DotsRenderer from "./components/DotsRenderer.svelte";
   import BricksRenderer from "./components/BricksRenderer.svelte";
@@ -31,6 +31,9 @@
   let rightWidth = $state(420);
   let isResizingLeft = $state(false);
   let isResizingRight = $state(false);
+  let resizeFrame: number | null = null;
+  let pendingResizeX = 0;
+  let resizeAppWidth = 0;
 
   let contextMenu = $state<{ x: number; y: number; sourceId: number; state: string; displayName: string; filePath: string | null } | null>(null);
 
@@ -218,8 +221,17 @@
       } else {
         workspaceState.activeAnnotation = anns[0];
       }
-      workspaceState = { ...workspaceState };
     }
+  }
+
+  function handleRenameWorkspace(name: string) {
+    if (!workspaceState) return;
+    const trimmed = name.trim();
+    if (!trimmed || trimmed === workspaceState.workspace.name) return;
+    workspaceState.workspace.name = trimmed;
+    workspaceState.workspace.updated_at = new Date().toISOString();
+    workspaceState = { ...workspaceState };
+    hasUnsavedChanges = true;
   }
 
   function handleCreateAnnotation(name: string) {
@@ -233,7 +245,6 @@
     };
     workspaceState.annotations = [...workspaceState.annotations, newAnn];
     workspaceState.activeAnnotation = newAnn;
-    workspaceState = { ...workspaceState };
     hasUnsavedChanges = true;
   }
 
@@ -242,7 +253,6 @@
     const ann = workspaceState.annotations.find((a) => a.id === id);
     if (ann) {
       workspaceState.activeAnnotation = ann;
-      workspaceState = { ...workspaceState };
     }
   }
 
@@ -253,7 +263,6 @@
     if (workspaceState.activeAnnotation?.id === id) {
       workspaceState.activeAnnotation = null;
     }
-    workspaceState = { ...workspaceState };
     hasUnsavedChanges = true;
   }
 
@@ -274,7 +283,6 @@
       created_at: new Date().toISOString(),
     };
     workspaceState.bookmarks = [...workspaceState.bookmarks, bm];
-    workspaceState = { ...workspaceState };
     hasUnsavedChanges = true;
   }
 
@@ -291,15 +299,12 @@
       created_at: new Date().toISOString(),
     };
     workspaceState.bookmarks = [...workspaceState.bookmarks, bm];
-    selectedRenderId = renderId;
-    workspaceState = { ...workspaceState };
     hasUnsavedChanges = true;
   }
 
   function handleRemoveBookmark(id: number) {
     if (!workspaceState) return;
     workspaceState.bookmarks = workspaceState.bookmarks.filter((b) => b.id !== id);
-    workspaceState = { ...workspaceState };
     hasUnsavedChanges = true;
   }
 
@@ -308,7 +313,6 @@
     workspaceState.bookmarks = workspaceState.bookmarks.map((b) =>
       b.id === id ? { ...b, comment: comment || null } : b
     );
-    workspaceState = { ...workspaceState };
     hasUnsavedChanges = true;
   }
 
@@ -420,8 +424,10 @@
     if (!workspaceState) return;
     try {
       if (workspaceState.filePath) {
+        workspaceState.workspace.updated_at = new Date().toISOString();
         const json = serializeWorkspace(workspaceState);
         await exportWorkspace(workspaceState.filePath, json);
+        workspaceState = { ...workspaceState };
         hasUnsavedChanges = false;
       } else {
         await handleSaveWorkspaceAs();
@@ -436,10 +442,10 @@
     try {
       const path = await pickSavePath();
       if (!path) return;
+      workspaceState.workspace.updated_at = new Date().toISOString();
       const json = serializeWorkspace(workspaceState);
       await exportWorkspace(path, json);
       workspaceState.filePath = path;
-      workspaceState.workspace.updated_at = new Date().toISOString();
       workspaceState = { ...workspaceState };
       hasUnsavedChanges = false;
       await addRecentWorkspace(path, workspaceState.workspace.name);
@@ -526,39 +532,60 @@
     contextMenu = null;
   }
 
-  function startResizeLeft(e: MouseEvent) {
+  function startResizeLeft(e: PointerEvent) {
     isResizingLeft = true;
+    resizeAppWidth = document.querySelector(".app")?.clientWidth ?? window.innerWidth;
+    (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
     document.body.style.cursor = "col-resize";
     document.body.style.userSelect = "none";
-    window.addEventListener("mousemove", onResizeMove);
-    window.addEventListener("mouseup", stopResize);
+    window.addEventListener("pointermove", onResizeMove);
+    window.addEventListener("pointerup", stopResize);
+    window.addEventListener("pointercancel", stopResize);
   }
 
-  function startResizeRight(e: MouseEvent) {
+  function startResizeRight(e: PointerEvent) {
     isResizingRight = true;
+    resizeAppWidth = document.querySelector(".app")?.clientWidth ?? window.innerWidth;
+    (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
     document.body.style.cursor = "col-resize";
     document.body.style.userSelect = "none";
-    window.addEventListener("mousemove", onResizeMove);
-    window.addEventListener("mouseup", stopResize);
+    window.addEventListener("pointermove", onResizeMove);
+    window.addEventListener("pointerup", stopResize);
+    window.addEventListener("pointercancel", stopResize);
   }
 
-  function onResizeMove(e: MouseEvent) {
+  function onResizeMove(e: PointerEvent) {
+    pendingResizeX = e.clientX;
+    if (resizeFrame != null) return;
+
+    resizeFrame = requestAnimationFrame(() => {
+      resizeFrame = null;
+      applyResize(pendingResizeX);
+    });
+  }
+
+  function applyResize(clientX: number) {
     if (isResizingLeft) {
-      leftWidth = Math.max(140, Math.min(400, e.clientX));
+      leftWidth = Math.max(140, Math.min(400, clientX));
     }
     if (isResizingRight) {
-      const appWidth = document.querySelector(".app")?.clientWidth ?? window.innerWidth;
-      rightWidth = Math.max(280, Math.min(600, appWidth - e.clientX));
+      rightWidth = Math.max(280, Math.min(600, resizeAppWidth - clientX));
     }
   }
 
   function stopResize() {
+    if (resizeFrame != null) {
+      cancelAnimationFrame(resizeFrame);
+      resizeFrame = null;
+      applyResize(pendingResizeX);
+    }
     isResizingLeft = false;
     isResizingRight = false;
     document.body.style.cursor = "";
     document.body.style.userSelect = "";
-    window.removeEventListener("mousemove", onResizeMove);
-    window.removeEventListener("mouseup", stopResize);
+    window.removeEventListener("pointermove", onResizeMove);
+    window.removeEventListener("pointerup", stopResize);
+    window.removeEventListener("pointercancel", stopResize);
   }
 
   initApp();
@@ -576,6 +603,7 @@
     onSaveWorkspaceAs={handleSaveWorkspaceAs}
     onAddFile={handleAddFileWithPath}
     onAddFolder={handleAddFolder}
+    onRenameWorkspace={handleRenameWorkspace}
     {showBookmarkPanel}
     onToggleBookmarkPanel={() => (showBookmarkPanel = !showBookmarkPanel)}
     {theme}
@@ -620,7 +648,7 @@
         </div>
       </aside>
       <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
-      <div class="resize-handle" onmousedown={startResizeLeft} role="separator" tabindex="-1" aria-label="Resize source list"></div>
+      <div class="resize-handle" onpointerdown={startResizeLeft} role="separator" tabindex="-1" aria-label="Resize source list"></div>
     {/if}
 
     <div class="canvas" class:dots-canvas={theme === "dots"} class:bricks-canvas={theme === "bricks"}>
@@ -654,7 +682,7 @@
 
     {#if selectedItem || showBookmarkPanel}
       <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
-      <div class="resize-handle" onmousedown={startResizeRight} role="separator" tabindex="-1" aria-label="Resize inspector"></div>
+      <div class="resize-handle" onpointerdown={startResizeRight} role="separator" tabindex="-1" aria-label="Resize inspector"></div>
       <aside class="right-panel" style="width: {rightWidth}px;">
         {#if showBookmarkPanel}
           <BookmarkPanel
@@ -793,6 +821,7 @@
     overflow: hidden;
     flex-shrink: 0;
     min-height: 0;
+    user-select: none;
   }
 
   .source-list-header {
@@ -897,6 +926,7 @@
     background: #e9ecef;
     transition: background 0.15s;
     flex-shrink: 0;
+    touch-action: none;
   }
 
   .resize-handle:hover {

@@ -8,6 +8,7 @@
     onSaveWorkspaceAs: () => void;
     onAddFile: () => void;
     onAddFolder: () => void;
+    onRenameWorkspace: (name: string) => void;
     showBookmarkPanel: boolean;
     onToggleBookmarkPanel: () => void;
     theme: "dots" | "bricks";
@@ -23,11 +24,27 @@
     onSaveWorkspaceAs,
     onAddFile,
     onAddFolder,
+    onRenameWorkspace,
     showBookmarkPanel,
     onToggleBookmarkPanel,
     theme,
     onSetTheme,
   }: Props = $props();
+
+  let draftWorkspaceName = $state("");
+
+  $effect(() => {
+    draftWorkspaceName = workspaceName;
+  });
+
+  function commitWorkspaceName() {
+    const name = draftWorkspaceName.trim();
+    if (name && name !== workspaceName) {
+      onRenameWorkspace(name);
+    } else {
+      draftWorkspaceName = workspaceName;
+    }
+  }
 </script>
 
 <header class="toolbar">
@@ -39,9 +56,26 @@
     <span class="divider"></span>
     <button onclick={onAddFile}>Add File</button>
     <button onclick={onAddFolder}>Add Folder</button>
-    <span class="workspace-name" title={workspaceName}>
-      {workspaceName}{hasUnsavedChanges ? " *" : ""}
-    </span>
+    <input
+      class="workspace-name"
+      title={workspaceName}
+      aria-label="Workspace name"
+      bind:value={draftWorkspaceName}
+      onblur={commitWorkspaceName}
+      onkeydown={(e) => {
+        if (e.key === "Enter") {
+          commitWorkspaceName();
+          (e.currentTarget as HTMLInputElement).blur();
+        }
+        if (e.key === "Escape") {
+          draftWorkspaceName = workspaceName;
+          (e.currentTarget as HTMLInputElement).blur();
+        }
+      }}
+    />
+    {#if hasUnsavedChanges}
+      <span class="unsaved-marker" title="Unsaved changes">*</span>
+    {/if}
   </div>
 
   <div class="toolbar-center">
@@ -114,10 +148,30 @@
     font-size: 13px;
     font-weight: 600;
     color: #495057;
-    max-width: 200px;
+    width: 180px;
+    min-width: 120px;
+    max-width: 220px;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
+    border: 1px solid transparent;
+    border-radius: 4px;
+    background: transparent;
+    padding: 5px 6px;
+  }
+
+  .workspace-name:hover,
+  .workspace-name:focus {
+    border-color: #ced4da;
+    background: #ffffff;
+    outline: none;
+  }
+
+  .unsaved-marker {
+    color: #868e96;
+    font-size: 13px;
+    font-weight: 700;
+    margin-left: -4px;
   }
 
   .icon-btn {

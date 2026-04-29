@@ -10,17 +10,31 @@ use traceloom_lib::state::AppState;
 use traceloom_lib::workspace_file::*;
 
 #[tauri::command]
-fn load_trajectory(path: String) -> Result<Trajectory, String> {
-    parser::parse_file(&path).map_err(|e| e.to_string())
+async fn load_trajectory(path: String) -> Result<Trajectory, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        parser::parse_file(&path).map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
-fn read_file_text(path: String) -> Result<String, String> {
-    std::fs::read_to_string(&path).map_err(|e| e.to_string())
+async fn read_file_text(path: String) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        std::fs::read_to_string(&path).map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
-fn list_jsonl_files(folder: String) -> Result<Vec<String>, String> {
+async fn list_jsonl_files(folder: String) -> Result<Vec<String>, String> {
+    tauri::async_runtime::spawn_blocking(move || list_jsonl_files_blocking(folder))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+fn list_jsonl_files_blocking(folder: String) -> Result<Vec<String>, String> {
     let path = Path::new(&folder);
     if !path.is_dir() {
         return Err("Not a directory".to_string());
