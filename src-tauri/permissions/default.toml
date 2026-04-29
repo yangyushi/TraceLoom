@@ -12,3 +12,28 @@ commands.allow = ["list_jsonl_files"]
 identifier = "allow-read-file-text"
 description = "Allows the read_file_text command to copy JSONL file contents."
 commands.allow = ["read_file_text"]
+
+[[permission]]
+identifier = "allow-export-workspace"
+description = "Allows exporting a workspace to a JSON file."
+commands.allow = ["export_workspace"]
+
+[[permission]]
+identifier = "allow-import-workspace"
+description = "Allows importing a workspace from a JSON file."
+commands.allow = ["import_workspace"]
+
+[[permission]]
+identifier = "allow-list-recent-workspaces"
+description = "Allows listing recent workspaces from cache."
+commands.allow = ["list_recent_workspaces"]
+
+[[permission]]
+identifier = "allow-add-recent-workspace"
+description = "Allows adding a workspace to the recent cache."
+commands.allow = ["add_recent_workspace"]
+
+[[permission]]
+identifier = "allow-remove-recent-workspace"
+description = "Allows removing a workspace from the recent cache."
+commands.allow = ["remove_recent_workspace"]

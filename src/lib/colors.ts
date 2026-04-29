@@ -99,3 +99,23 @@ export function getFillColor(kind: string): string {
 export function getStrokeColor(kind: string): string {
   return getColorSchema(kind).stroke;
 }
+
+const SOURCE_COLORS = [
+  "#1e88e5", // blue
+  "#43a047", // green
+  "#fb8c00", // orange
+  "#8e24aa", // purple
+  "#00acc1", // cyan
+  "#e53935", // red
+  "#fdd835", // yellow
+  "#6d4c41", // brown
+];
+
+export function getSourceColor(key: string): string {
+  let hash = 0;
+  for (let i = 0; i < key.length; i++) {
+    hash = key.charCodeAt(i) + ((hash << 5) - hash);
+  }
+  const index = Math.abs(hash) % SOURCE_COLORS.length;
+  return SOURCE_COLORS[index];
+}

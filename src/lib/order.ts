@@ -13,11 +13,18 @@ export interface BlockItem {
 
 export type OrderedItem = MessageItem | BlockItem;
 
+const topologicalCache = new WeakMap<Message[], Message[]>();
+const orderedItemsCache = new WeakMap<Message[], OrderedItem[]>();
+const itemLookupCache = new WeakMap<Trajectory, Map<string, OrderedItem>>();
+
 function timestampValue(message: Message): number {
   return message.timestamp ? Date.parse(message.timestamp) || 0 : 0;
 }
 
 export function topologicalMessages(messages: Message[]): Message[] {
+  const cached = topologicalCache.get(messages);
+  if (cached) return cached;
+
   const msgMap = new Map(messages.map((message) => [message.id, message]));
   const sourceIndex = new Map(messages.map((message, index) => [message.id, index]));
   const inDegree = new Map<string, number>();
@@ -71,20 +78,31 @@ export function topologicalMessages(messages: Message[]): Message[] {
     }
   }
 
+  topologicalCache.set(messages, result);
   return result;
 }
 
 export function orderedItems(messages: Message[]): OrderedItem[] {
-  return topologicalMessages(messages).flatMap((message) => [
+  const cached = orderedItemsCache.get(messages);
+  if (cached) return cached;
+
+  const items = topologicalMessages(messages).flatMap((message) => [
     { type: "message" as const, message },
     ...message.blocks.map((block) => ({ type: "block" as const, message, block })),
   ]);
+  orderedItemsCache.set(messages, items);
+  return items;
 }
 
 export function findOrderedItem(trajectory: Trajectory, id: string | null): OrderedItem | null {
   if (!id) return null;
-  return orderedItems(trajectory.messages).find((item) => {
-    if (item.type === "message") return item.message.id === id;
-    return item.block.id === id;
-  }) ?? null;
+  let lookup = itemLookupCache.get(trajectory);
+  if (!lookup) {
+    lookup = new Map();
+    for (const item of orderedItems(trajectory.messages)) {
+      lookup.set(item.type === "message" ? item.message.id : item.block.id, item);
+    }
+    itemLookupCache.set(trajectory, lookup);
+  }
+  return lookup.get(id) ?? null;
 }
