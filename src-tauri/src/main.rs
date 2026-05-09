@@ -63,8 +63,8 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
-            let conn = init_db(&app.handle())?;
-            let db_path = traceloom_lib::db::db_path(&app.handle())?;
+            let conn = init_db(app.handle())?;
+            let db_path = traceloom_lib::db::db_path(app.handle())?;
             app.manage(AppState::new(db_path, conn));
             Ok(())
         })
