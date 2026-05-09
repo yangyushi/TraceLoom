@@ -1,27 +1,89 @@
 <script lang="ts">
-  import type { Trajectory, Message } from "../types/ir";
-  import { getFillColor, getStrokeColor } from "../lib/colors";
+  import type { TrajectorySource, RenderId } from "../types/workspace";
+  import { namespaceId } from "../lib/workspace";
+  import { getFillColor, getStrokeColor, getSourceColor } from "../lib/colors";
   import { topologicalMessages } from "../lib/order";
   import type cytoscape from "cytoscape";
-  import { onDestroy } from "svelte";
+  import { onDestroy, untrack } from "svelte";
 
   interface Props {
-    trajectory: Trajectory;
-    onSelect: (id: string) => void;
-    selectedId: string | null;
+    sources: TrajectorySource[];
+    onSelect: (renderId: RenderId) => void;
+    selectedRenderId: RenderId | null;
+    onQuickAddBookmark: (renderId: RenderId) => void;
   }
 
-  let { trajectory, onSelect, selectedId }: Props = $props();
+  let { sources, onSelect, selectedRenderId, onQuickAddBookmark }: Props = $props();
 
   let container: HTMLDivElement | null = $state(null);
   let cy: cytoscape.Core | null = null;
   let cytoscapeFactory: typeof cytoscape | null = null;
+  let resizeObserver: ResizeObserver | null = null;
+  let previousSelectedRenderId: RenderId | null = null;
+  let nodeContextMenu = $state<{ x: number; y: number; renderId: string } | null>(null);
 
   const MSG_X = 0;
   const BLOCK_X_OFFSET = 140;
   const BLOCK_H_SPACING = 45;
   const MIN_MSG_SPACING = 100;
   const PADDING = 40;
+  const LANE_WIDTH = 400;
+  const INITIAL_ZOOM = 1;
+
+  interface NavigationRow {
+    messageId: string;
+    blockIds: string[];
+  }
+
+  interface NavigationIndex {
+    rows: NavigationRow[];
+    rowByRenderId: Map<string, number>;
+    blockByRenderId: Map<string, { rowIndex: number; blockIndex: number }>;
+  }
+
+  const renderSignature = $derived.by(() =>
+    sources
+      .map((source) => {
+        const trajectory = source.trajectory;
+        return [
+          source.id,
+          source.visibility_state,
+          source.display_name,
+          trajectory?.messages.length ?? 0,
+          trajectory?.messages.map((msg) => `${msg.id}:${msg.blocks.length}`).join(",") ?? "",
+        ].join("|");
+      })
+      .join(";")
+  );
+
+  const navigationIndex = $derived.by((): NavigationIndex => {
+    const rows: NavigationRow[] = [];
+    const rowByRenderId = new Map<string, number>();
+    const blockByRenderId = new Map<string, { rowIndex: number; blockIndex: number }>();
+
+    for (let si = 0; si < sources.length; si++) {
+      const traj = sources[si].trajectory;
+      if (!traj) continue;
+      const msgOrder = topologicalMessages(traj.messages);
+      for (const msg of msgOrder) {
+        const rowIndex = rows.length;
+        const messageId = namespaceId(sources[si].id, msg.id);
+        const blockIds = msg.blocks.map((block) => namespaceId(sources[si].id, block.id));
+        rows.push({
+          messageId,
+          blockIds,
+        });
+        rowByRenderId.set(messageId, rowIndex);
+        for (let blockIndex = 0; blockIndex < blockIds.length; blockIndex++) {
+          const blockId = blockIds[blockIndex];
+          rowByRenderId.set(blockId, rowIndex);
+          blockByRenderId.set(blockId, { rowIndex, blockIndex });
+        }
+      }
+    }
+
+    return { rows, rowByRenderId, blockByRenderId };
+  });
 
   async function loadCytoscape(): Promise<typeof cytoscape> {
     if (!cytoscapeFactory) {
@@ -34,89 +96,102 @@
     return { selector, style } as cytoscape.StylesheetJsonBlock;
   }
 
-  function buildElements(): {
+  interface SourceElements {
     elements: cytoscape.ElementDefinition[];
-    msgOrder: Message[];
-    msgY: Map<string, number>;
-  } {
-    const elements: cytoscape.ElementDefinition[] = [];
-    const msgOrder = topologicalMessages(trajectory.messages);
+    msgOrder: { msgId: string; y: number }[];
+  }
 
-    // Compute message Y positions (adaptive spacing)
+  function buildSourceElements(source: TrajectorySource, laneIndex: number): SourceElements {
+    const elements: cytoscape.ElementDefinition[] = [];
+    const laneOffset = laneIndex * LANE_WIDTH;
+    if (!source.trajectory) return { elements: [], msgOrder: [] };
+    const msgOrder = topologicalMessages(source.trajectory.messages);
+
     let currentY = 0;
     const msgY = new Map<string, number>();
     for (const msg of msgOrder) {
       msgY.set(msg.id, currentY);
-      // Blocks now share the message's Y, so they don't add vertical height
-      const blockClusterHeight = 0;
-      const spacing = Math.max(MIN_MSG_SPACING, blockClusterHeight + PADDING);
+      const spacing = Math.max(MIN_MSG_SPACING, PADDING);
       currentY += spacing;
     }
 
-    // Create message nodes
+    // Source label
+    elements.push({
+      data: {
+        id: `label-${source.id}`,
+        label: source.display_name,
+        color: getSourceColor(source.color_key),
+        isLabel: true,
+      },
+      position: { x: laneOffset + MSG_X, y: -40 },
+    });
+
     for (const msg of msgOrder) {
       const y = msgY.get(msg.id)!;
+      const renderId = namespaceId(source.id, msg.id);
       elements.push({
         data: {
-          id: msg.id,
+          id: renderId,
           label: msg.role.charAt(0).toUpperCase(),
           color: getFillColor(msg.role),
           stroke: getStrokeColor(msg.role),
           isMessage: true,
+          sourceId: source.id,
         },
-        position: { x: MSG_X, y },
+        position: { x: laneOffset + MSG_X, y },
       });
     }
 
-    // Create block nodes (all blocks from same message share the message's Y)
     for (const msg of msgOrder) {
       const my = msgY.get(msg.id)!;
       const n = msg.blocks.length;
       for (let i = 0; i < n; i++) {
         const block = msg.blocks[i];
+        const renderId = namespaceId(source.id, block.id);
         elements.push({
           data: {
-            id: block.id,
+            id: renderId,
             label: block.kind,
             color: getFillColor(block.kind),
             stroke: getStrokeColor(block.kind),
             isMessage: false,
+            sourceId: source.id,
           },
-          position: { x: MSG_X + BLOCK_X_OFFSET + i * BLOCK_H_SPACING, y: my },
+          position: { x: laneOffset + BLOCK_X_OFFSET + i * BLOCK_H_SPACING, y: my },
         });
       }
     }
 
-    // Collect all node IDs so we never create edges to missing nodes
     const nodeIds = new Set(elements.map((el) => el.data!.id as string));
 
-    // Create edges
     for (const msg of msgOrder) {
-      if (msg.parent_id && nodeIds.has(msg.parent_id)) {
+      const msgRenderId = namespaceId(source.id, msg.id);
+      if (msg.parent_id && nodeIds.has(namespaceId(source.id, msg.parent_id))) {
         elements.push({
           data: {
-            id: `${msg.parent_id}-${msg.id}`,
-            source: msg.parent_id,
-            target: msg.id,
+            id: `edge-${source.id}-${msg.parent_id}-${msg.id}`,
+            source: namespaceId(source.id, msg.parent_id),
+            target: msgRenderId,
             edgeType: "chain",
           },
         });
       }
       for (const block of msg.blocks) {
+        const blockRenderId = namespaceId(source.id, block.id);
         elements.push({
           data: {
-            id: `${msg.id}-${block.id}`,
-            source: msg.id,
-            target: block.id,
+            id: `edge-${source.id}-${msg.id}-${block.id}`,
+            source: msgRenderId,
+            target: blockRenderId,
             edgeType: "contain",
           },
         });
-        if (block.tool_call_id && nodeIds.has(block.tool_call_id)) {
+        if (block.tool_call_id && nodeIds.has(namespaceId(source.id, block.tool_call_id))) {
           elements.push({
             data: {
-              id: `${block.tool_call_id}-${block.id}`,
-              source: block.tool_call_id,
-              target: block.id,
+              id: `edge-${source.id}-${block.tool_call_id}-${block.id}`,
+              source: namespaceId(source.id, block.tool_call_id),
+              target: blockRenderId,
               edgeType: "tool",
             },
           });
@@ -124,7 +199,10 @@
       }
     }
 
-    return { elements, msgOrder, msgY };
+    return {
+      elements,
+      msgOrder: msgOrder.map((m) => ({ msgId: m.id, y: msgY.get(m.id)! })),
+    };
   }
 
   async function createCy() {
@@ -140,65 +218,83 @@
       cy.destroy();
       cy = null;
     }
+    previousSelectedRenderId = null;
 
-    const { elements, msgOrder, msgY } = buildElements();
+    const allElements: cytoscape.ElementDefinition[] = [];
+
+    for (let i = 0; i < sources.length; i++) {
+      const { elements } = buildSourceElements(sources[i], i);
+      allElements.push(...elements);
+    }
+
     const cytoscape = await loadCytoscape();
     if (!container) return;
 
     cy = cytoscape({
       container,
-      elements,
+      elements: allElements,
       style: [
         sheet("node", {
-            "background-color": "data(color)",
-            "border-color": "data(stroke)",
-            "border-width": 2,
-            width: (ele: cytoscape.NodeSingular) => (ele.data("isMessage") ? "28px" : "16px"),
-            height: (ele: cytoscape.NodeSingular) => (ele.data("isMessage") ? "28px" : "16px"),
-            label: "data(label)",
-            "font-size": (ele: cytoscape.NodeSingular) =>
-              ele.data("isMessage") ? "13px" : "10px",
-            "text-valign": "bottom",
-            "text-halign": "center",
-            "text-margin-y": 5,
-            color: "#495057",
-            "font-weight": (ele: cytoscape.NodeSingular) =>
-              ele.data("isMessage") ? "bold" : "normal",
-            "text-background-color": "#f8f9fa",
-            "text-background-opacity": 0.8,
-            "text-background-padding": 2,
+          "background-color": "data(color)",
+          "border-color": "data(stroke)",
+          "border-width": 2,
+          width: (ele: cytoscape.NodeSingular) => (ele.data("isMessage") ? "28px" : "16px"),
+          height: (ele: cytoscape.NodeSingular) => (ele.data("isMessage") ? "28px" : "16px"),
+          label: "data(label)",
+          "font-size": (ele: cytoscape.NodeSingular) =>
+            ele.data("isMessage") ? "13px" : "10px",
+          "text-valign": "bottom",
+          "text-halign": "center",
+          "text-margin-y": 5,
+          color: "#495057",
+          "font-weight": (ele: cytoscape.NodeSingular) =>
+            ele.data("isMessage") ? "bold" : "normal",
+          "text-background-color": "#f8f9fa",
+          "text-background-opacity": 0.8,
+          "text-background-padding": 2,
+        }),
+        sheet("node[isLabel]", {
+          width: "1px",
+          height: "1px",
+          "background-opacity": 0,
+          "border-width": 0,
+          "font-size": "12px",
+          "font-weight": "bold",
+          color: "data(color)",
+          "text-valign": "center",
+          "text-halign": "center",
         }),
         sheet("edge[edgeType = 'chain']", {
-            width: 1.5,
-            "line-color": "#adb5bd",
-            "target-arrow-color": "#adb5bd",
-            "target-arrow-shape": "triangle",
-            "curve-style": "bezier",
-            "arrow-scale": 0.7,
+          width: 1.5,
+          "line-color": "#adb5bd",
+          "target-arrow-color": "#adb5bd",
+          "target-arrow-shape": "triangle",
+          "curve-style": "bezier",
+          "arrow-scale": 0.7,
         }),
         sheet("edge[edgeType = 'contain']", {
-            width: 1,
-            "line-color": "#ced4da",
-            "line-style": "dashed",
-            "target-arrow-color": "#ced4da",
-            "target-arrow-shape": "triangle",
-            "curve-style": "bezier",
-            "arrow-scale": 0.6,
+          width: 1,
+          "line-color": "#ced4da",
+          "line-style": "dashed",
+          "target-arrow-color": "#ced4da",
+          "target-arrow-shape": "triangle",
+          "curve-style": "bezier",
+          "arrow-scale": 0.6,
         }),
         sheet("edge[edgeType = 'tool']", {
-            width: 1.5,
-            "line-color": "#339af0",
-            "target-arrow-color": "#339af0",
-            "target-arrow-shape": "triangle",
-            "curve-style": "unbundled-bezier",
-            "arrow-scale": 0.7,
-            "control-point-distances": [40],
-            "control-point-weights": [0.5],
+          width: 1.5,
+          "line-color": "#339af0",
+          "target-arrow-color": "#339af0",
+          "target-arrow-shape": "triangle",
+          "curve-style": "unbundled-bezier",
+          "arrow-scale": 0.7,
+          "control-point-distances": [40],
+          "control-point-weights": [0.5],
         }),
         sheet(":selected", {
-            "border-color": "#212529",
-            "border-width": 3,
-            "background-color": "#e7f5ff",
+          "border-color": "#212529",
+          "border-width": 3,
+          "background-color": "#e7f5ff",
         }),
       ],
       layout: {
@@ -209,25 +305,25 @@
       minZoom: 0.05,
       maxZoom: 3,
       wheelSensitivity: 0.3,
+      autoungrabify: true,
     });
 
-    // Fix zoom so that ~10 message nodes fill the viewport vertically
-    if (msgOrder.length > 0) {
-      const targetCount = Math.min(10, msgOrder.length);
-      const targetHeight = msgY.get(msgOrder[targetCount - 1].id)! + MIN_MSG_SPACING;
-      const zoom = Math.min(3, Math.max(0.05, rect.height / targetHeight));
-      cy.zoom(zoom);
-      cy.center(cy.getElementById(msgOrder[0].id));
+    // Keep message nodes at a fixed rendered size on import/load.
+    if (allElements.length > 0) {
+      cy.zoom(INITIAL_ZOOM);
+      cy.pan({ x: Math.max(PADDING, rect.width / 2 - BLOCK_X_OFFSET), y: PADDING + 40 });
     }
 
     cy.on("tap", "node", (evt: cytoscape.EventObjectNode) => {
       const id = evt.target.id();
-      if (id) onSelect(id);
+      if (id && !evt.target.data("isLabel")) {
+        onSelect(id);
+      }
     });
 
     cy.on("dbltap", "node", (evt: cytoscape.EventObjectNode) => {
       const id = evt.target.id();
-      if (!id || !cy) return;
+      if (!id || !cy || evt.target.data("isLabel")) return;
       const ele = cy.getElementById(id);
       if (ele.length > 0) {
         cy.animate(
@@ -239,16 +335,45 @@
         );
       }
     });
+
+    cy.on("cxttap", "node", (evt: cytoscape.EventObjectNode) => {
+      const id = evt.target.id();
+      if (!id || evt.target.data("isLabel")) return;
+      const pos = evt.target.renderedPosition();
+      if (pos) {
+        nodeContextMenu = { x: pos.x, y: pos.y, renderId: id };
+      }
+    });
+
+    cy.on("tap", (evt: cytoscape.EventObject) => {
+      if (evt.target === cy || evt.target.isNode?.()) {
+        nodeContextMenu = null;
+      }
+    });
+
+    updateSelection();
   }
 
   function updateSelection() {
     if (!cy) return;
-    cy.nodes().unselect();
-    const id = selectedId;
+    const id = selectedRenderId;
+    if (id === previousSelectedRenderId) return;
+
+    const previousId = previousSelectedRenderId;
+    previousSelectedRenderId = id;
+
+    if (previousId) {
+      const previous = cy.getElementById(previousId);
+      if (previous.length > 0) {
+        previous.unselect();
+      }
+    }
+
     if (id) {
       const ele = cy.getElementById(id);
       if (ele.length > 0) {
         ele.select();
+        cy.stop(false, true);
         cy.animate(
           {
             center: { eles: ele },
@@ -260,77 +385,92 @@
     }
   }
 
-  // Initialize when container is bound or trajectory changes
   $effect(() => {
     const c = container;
-    const t = trajectory;
-      void t;
+    const signature = renderSignature;
+    void signature;
     if (c) {
-      void createCy();
+      void untrack(createCy);
     }
   });
 
-  // Update selection highlight when selectedId changes
   $effect(() => {
-    const id = selectedId;
+    const c = container;
+    if (!c) return;
+
+    resizeObserver?.disconnect();
+    resizeObserver = new ResizeObserver(() => {
+      cy?.resize();
+    });
+    resizeObserver.observe(c);
+
+    return () => {
+      resizeObserver?.disconnect();
+      resizeObserver = null;
+    };
+  });
+
+  $effect(() => {
+    const id = selectedRenderId;
     void id;
     updateSelection();
   });
 
   onDestroy(() => {
+    resizeObserver?.disconnect();
     if (cy) {
       cy.destroy();
       cy = null;
     }
+    previousSelectedRenderId = null;
   });
 
   function getNavigationTarget(key: string): string | null {
-    if (!selectedId) return null;
+    if (!selectedRenderId) return null;
 
-    const msgOrder = topologicalMessages(trajectory.messages);
-    const msgIndex = msgOrder.findIndex((m) => m.id === selectedId);
+    const { rows, rowByRenderId, blockByRenderId } = navigationIndex;
+    const rowIndex = rowByRenderId.get(selectedRenderId) ?? -1;
+    if (rowIndex < 0) return null;
 
-    if (msgIndex >= 0) {
-      const msg = msgOrder[msgIndex];
-      switch (key) {
-        case "ArrowRight":
-          return msg.blocks[0]?.id ?? null;
-        case "ArrowUp":
-          return msgOrder[msgIndex - 1]?.id ?? null;
-        case "ArrowDown":
-          return msgOrder[msgIndex + 1]?.id ?? null;
-      }
-    } else {
-      for (let i = 0; i < msgOrder.length; i++) {
-        const msg = msgOrder[i];
-        const blockIndex = msg.blocks.findIndex((b) => b.id === selectedId);
-        if (blockIndex >= 0) {
-          switch (key) {
-            case "ArrowRight":
-              return msg.blocks[blockIndex + 1]?.id ?? null;
-            case "ArrowLeft":
-              if (blockIndex === 0) return msg.id;
-              return msg.blocks[blockIndex - 1]?.id ?? null;
-            case "ArrowUp":
-              return msgOrder[i - 1]?.id ?? null;
-            case "ArrowDown":
-              return msgOrder[i + 1]?.id ?? null;
-          }
-        }
-      }
+    const row = rows[rowIndex];
+    const isMessage = row.messageId === selectedRenderId;
+    const blockPosition = blockByRenderId.get(selectedRenderId);
+
+    switch (key) {
+      case "ArrowLeft":
+        if (!blockPosition) return null;
+        return blockPosition.blockIndex > 0
+          ? row.blockIds[blockPosition.blockIndex - 1]
+          : row.messageId;
+      case "ArrowRight":
+        if (isMessage) return row.blockIds[0] ?? null;
+        if (!blockPosition) return null;
+        return row.blockIds[blockPosition.blockIndex + 1] ?? null;
+      case "ArrowUp":
+        return rows[rowIndex - 1]?.messageId ?? null;
+      case "ArrowDown":
+        return rows[rowIndex + 1]?.messageId ?? null;
     }
     return null;
+  }
+
+  function isEditableTarget(target: HTMLElement): boolean {
+    return target.tagName === "INPUT" || target.tagName === "TEXTAREA" || target.isContentEditable;
+  }
+
+  function isGraphKeyTarget(target: HTMLElement): boolean {
+    if (isEditableTarget(target)) return false;
+    if (target === document.body || target === document.documentElement) return true;
+    return container?.contains(target) ?? false;
   }
 
   function handleKeydown(e: KeyboardEvent) {
     if (!["ArrowRight", "ArrowLeft", "ArrowUp", "ArrowDown"].includes(e.key)) return;
     const target = e.target as HTMLElement;
-    if (target.tagName === "INPUT" || target.tagName === "TEXTAREA" || target.isContentEditable) {
-      return;
-    }
-    e.preventDefault();
+    if (!isGraphKeyTarget(target)) return;
     const nextId = getNavigationTarget(e.key);
     if (nextId) {
+      e.preventDefault();
       onSelect(nextId);
     }
   }
@@ -338,12 +478,52 @@
 
 <svelte:window onkeydown={handleKeydown} />
 
-<div class="dots-container" bind:this={container}></div>
+<div class="dots-container" bind:this={container}>
+  {#if nodeContextMenu}
+    <div
+      class="node-context-menu"
+      style="left: {nodeContextMenu.x}px; top: {nodeContextMenu.y}px;"
+    >
+      <button onclick={() => { onQuickAddBookmark(nodeContextMenu!.renderId); nodeContextMenu = null; }}>
+        Add Bookmark
+      </button>
+    </div>
+  {/if}
+</div>
 
 <style>
   .dots-container {
     width: 100%;
     height: 100%;
     background: #f8f9fa;
+    position: relative;
+  }
+
+  .node-context-menu {
+    position: absolute;
+    z-index: 100;
+    background: #ffffff;
+    border: 1px solid #dee2e6;
+    border-radius: 6px;
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+    display: flex;
+    flex-direction: column;
+    min-width: 140px;
+    padding: 4px;
+  }
+
+  .node-context-menu button {
+    background: none;
+    border: none;
+    padding: 8px 12px;
+    text-align: left;
+    font-size: 13px;
+    color: #212529;
+    cursor: pointer;
+    border-radius: 4px;
+  }
+
+  .node-context-menu button:hover {
+    background: #f1f3f5;
   }
 </style>

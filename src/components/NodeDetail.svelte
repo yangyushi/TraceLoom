@@ -1,5 +1,6 @@
 <script lang="ts">
   import type { Message, Block } from "../types/ir";
+  import type { Bookmark } from "../types/workspace";
   import { getBlockRawText } from "../lib/blockPreview";
 
   interface MessageItem {
@@ -16,9 +17,27 @@
   interface Props {
     item: MessageItem | BlockItem | null;
     onClose: () => void;
+    nodeId: string | null;
+    bookmarks: Bookmark[];
+    onAddBookmark: (comment: string) => void;
+    onRemoveBookmark: (id: number) => void;
   }
 
-  let { item, onClose }: Props = $props();
+  let { item, onClose, nodeId, bookmarks, onAddBookmark, onRemoveBookmark }: Props = $props();
+
+  let showBookmarkForm = $state(false);
+  let bookmarkComment = $state("");
+
+  const existingBookmark = $derived.by(() => {
+    if (!nodeId) return null;
+    return bookmarks.find((b) => b.node_id === nodeId) ?? null;
+  });
+
+  function handleAddBookmark() {
+    onAddBookmark(bookmarkComment);
+    bookmarkComment = "";
+    showBookmarkForm = false;
+  }
   let showMarkdown = $state(false);
   let showItems = $state(false);
   let rendererVersion = $state(0);
@@ -27,7 +46,51 @@
   let loadingMarked = false;
   let loadingPrism = false;
 
+  const MAX_CACHE_ENTRIES = 24;
+  const MAX_HIGHLIGHT_BYTES = 100_000;
+  const MAX_MARKDOWN_BYTES = 160_000;
   const MAX_JSON_EXTRACTION_BYTES = 200_000;
+  const highlightCache = new Map<string, string>();
+  const markdownCache = new Map<string, string>();
+  const sectionCache = new Map<string, Section[]>();
+  const objectItemsCache = new Map<string, KvItem[]>();
+
+  const blockRawText = $derived.by(() =>
+    item?.type === "block" ? getBlockRawText(item.block) : ""
+  );
+
+  const messageRawJson = $derived.by(() =>
+    item?.type === "message" ? item.message.raw_json : null
+  );
+
+  const prettyMessageJson = $derived.by(() =>
+    messageRawJson ? prettyPrintJson(messageRawJson) : ""
+  );
+
+  const highlightedMessageJson = $derived.by(() =>
+    prettyMessageJson ? highlightJson(prettyMessageJson) : ""
+  );
+
+  const highlightedBlockRaw = $derived.by(() =>
+    item?.type === "block" ? highlightJson(blockRawText) : ""
+  );
+
+  const blockSections = $derived.by(() =>
+    item?.type === "block" ? parseSections(blockRawText) : []
+  );
+
+  const messageObjectItems = $derived.by(() =>
+    messageRawJson ? parseObjectItems(messageRawJson) : []
+  );
+
+  function remember<T>(cache: Map<string, T>, key: string, value: T): T {
+    cache.set(key, value);
+    if (cache.size > MAX_CACHE_ENTRIES) {
+      const oldest = cache.keys().next().value;
+      if (oldest !== undefined) cache.delete(oldest);
+    }
+    return value;
+  }
 
   function ensureMarked() {
     if (markedParser || loadingMarked) return;
@@ -102,25 +165,38 @@
 
   function highlightJson(text: string): string {
     rendererVersion;
+    if (text.length > MAX_HIGHLIGHT_BYTES) {
+      return escapeHtml(text);
+    }
+
+    const prismReady = Boolean(prism?.languages.json);
+    const cacheKey = `${prismReady ? "prism" : "plain"}:${text}`;
+    const cached = highlightCache.get(cacheKey);
+    if (cached) return cached;
+
     ensurePrism();
     try {
       JSON.parse(text);
-      if (prism?.languages.json) {
-        return sanitizeHtml(prism.highlight(text, prism.languages.json, "json"));
+      if (prismReady && prism?.languages.json) {
+        return remember(
+          highlightCache,
+          cacheKey,
+          sanitizeHtml(prism.highlight(text, prism.languages.json, "json"))
+        );
       }
-      return escapeHtml(text);
+      return remember(highlightCache, cacheKey, escapeHtml(text));
     } catch {
       const jsonBlock = findJsonInText(text);
       if (jsonBlock) {
         const before = escapeHtml(text.slice(0, text.indexOf(jsonBlock)));
-        const highlighted = prism?.languages.json
+        const highlighted = prismReady && prism?.languages.json
           ? sanitizeHtml(prism.highlight(jsonBlock, prism.languages.json, "json"))
           : escapeHtml(jsonBlock);
         const after = escapeHtml(text.slice(text.indexOf(jsonBlock) + jsonBlock.length));
-        return `${before}${highlighted}${after}`;
+        return remember(highlightCache, cacheKey, `${before}${highlighted}${after}`);
       }
     }
-    return escapeHtml(text);
+    return remember(highlightCache, cacheKey, escapeHtml(text));
   }
 
   function escapeHtml(text: string): string {
@@ -201,6 +277,9 @@
   }
 
   function parseSections(raw: string): Section[] {
+    const cached = sectionCache.get(raw);
+    if (cached) return cached;
+
     try {
       const parsed = JSON.parse(raw);
       if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
@@ -210,7 +289,7 @@
             typeof val === "string" ? val : JSON.stringify(val, null, 2);
           sections.push({ key, value, isMarkdown: typeof val === "string" });
         }
-        return sections;
+        return remember(sectionCache, raw, sections);
       }
     } catch {
       // Not pure JSON object
@@ -227,24 +306,37 @@
               typeof val === "string" ? val : JSON.stringify(val, null, 2);
             sections.push({ key, value, isMarkdown: typeof val === "string" });
           }
-          return sections;
+          return remember(sectionCache, raw, sections);
         }
       } catch {
         // Embedded JSON is not an object
       }
     }
 
-    return [{ key: "Content", value: raw, isMarkdown: true }];
+    return remember(sectionCache, raw, [{ key: "Content", value: raw, isMarkdown: true }]);
   }
 
   function renderMarkdown(value: string): string {
     rendererVersion;
+    if (value.length > MAX_MARKDOWN_BYTES) {
+      return escapeHtml(value);
+    }
+
+    const markedReady = Boolean(markedParser);
+    const cacheKey = `${markedReady ? "marked" : "plain"}:${value}`;
+    const cached = markdownCache.get(cacheKey);
+    if (cached) return cached;
+
     ensureMarked();
     try {
-      if (!markedParser) return escapeHtml(value);
-      return sanitizeHtml(markedParser.parse(escapeHtml(value), { async: false }) as string);
+      if (!markedParser) return remember(markdownCache, cacheKey, escapeHtml(value));
+      return remember(
+        markdownCache,
+        cacheKey,
+        sanitizeHtml(markedParser.parse(escapeHtml(value), { async: false }) as string)
+      );
     } catch {
-      return escapeHtml(value);
+      return remember(markdownCache, cacheKey, escapeHtml(value));
     }
   }
 
@@ -269,6 +361,9 @@
   }
 
   function parseObjectItems(raw: string): KvItem[] {
+    const cached = objectItemsCache.get(raw);
+    if (cached) return cached;
+
     try {
       const parsed = JSON.parse(raw);
       if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
@@ -280,12 +375,12 @@
             items.push({ key, value: JSON.stringify(val, null, 2), isJson: true });
           }
         }
-        return items;
+        return remember(objectItemsCache, raw, items);
       }
     } catch {
       // fall through
     }
-    return [{ key: "Content", value: raw, isJson: false }];
+    return remember(objectItemsCache, raw, [{ key: "Content", value: raw, isJson: false }]);
   }
 </script>
 
@@ -294,8 +389,39 @@
     {@const msg = item.message}
     <div class="detail-header">
       <h3>{msg.role}</h3>
-      <button class="close-btn" onclick={onClose}>&times;</button>
+      <div class="header-actions">
+        {#if existingBookmark}
+          <button class="bookmark-btn active" onclick={() => onRemoveBookmark(existingBookmark.id)} title="Remove bookmark">
+            ★
+          </button>
+        {:else}
+          <button class="bookmark-btn" onclick={() => showBookmarkForm = !showBookmarkForm} title="Add bookmark">
+            ☆
+          </button>
+        {/if}
+        <button class="close-btn" onclick={onClose}>&times;</button>
+      </div>
     </div>
+
+    {#if showBookmarkForm}
+      <div class="bookmark-form">
+        <textarea
+          placeholder="Add a comment (optional)..."
+          bind:value={bookmarkComment}
+          rows={2}
+        ></textarea>
+        <div class="bookmark-form-actions">
+          <button onclick={handleAddBookmark}>Add Bookmark</button>
+          <button onclick={() => { showBookmarkForm = false; bookmarkComment = ""; }}>Cancel</button>
+        </div>
+      </div>
+    {/if}
+
+    {#if existingBookmark?.comment}
+      <div class="bookmark-comment">
+        <strong>Bookmark:</strong> {existingBookmark.comment}
+      </div>
+    {/if}
 
     <div class="detail-meta">
       <div><strong>ID:</strong> {msg.id}</div>
@@ -318,7 +444,7 @@
         </div>
         {#if showItems}
           <div class="item-sections">
-            {#each parseObjectItems(msg.raw_json) as item}
+            {#each messageObjectItems as item}
               <details class="item-section" open>
                 <summary class="item-title">{item.key}</summary>
                 <div class="item-body">
@@ -332,7 +458,7 @@
             {/each}
           </div>
         {:else}
-          <pre class="raw-body">{@html highlightJson(prettyPrintJson(msg.raw_json))}</pre>
+          <pre class="raw-body">{@html highlightedMessageJson}</pre>
         {/if}
       </div>
     {/if}
@@ -341,8 +467,39 @@
     {@const msg = item.message}
     <div class="detail-header">
       <h3>{block.kind}</h3>
-      <button class="close-btn" onclick={onClose}>&times;</button>
+      <div class="header-actions">
+        {#if existingBookmark}
+          <button class="bookmark-btn active" onclick={() => onRemoveBookmark(existingBookmark.id)} title="Remove bookmark">
+            ★
+          </button>
+        {:else}
+          <button class="bookmark-btn" onclick={() => showBookmarkForm = !showBookmarkForm} title="Add bookmark">
+            ☆
+          </button>
+        {/if}
+        <button class="close-btn" onclick={onClose}>&times;</button>
+      </div>
     </div>
+
+    {#if showBookmarkForm}
+      <div class="bookmark-form">
+        <textarea
+          placeholder="Add a comment (optional)..."
+          bind:value={bookmarkComment}
+          rows={2}
+        ></textarea>
+        <div class="bookmark-form-actions">
+          <button onclick={handleAddBookmark}>Add Bookmark</button>
+          <button onclick={() => { showBookmarkForm = false; bookmarkComment = ""; }}>Cancel</button>
+        </div>
+      </div>
+    {/if}
+
+    {#if existingBookmark?.comment}
+      <div class="bookmark-comment">
+        <strong>Bookmark:</strong> {existingBookmark.comment}
+      </div>
+    {/if}
 
     <div class="detail-meta">
       <div><strong>ID:</strong> {block.id}</div>
@@ -361,7 +518,7 @@
 
       {#if showMarkdown}
         <div class="markdown-sections">
-          {#each parseSections(getBlockRawText(block)) as section}
+          {#each blockSections as section}
             <details class="markdown-section" open>
               <summary class="section-title">{section.key}</summary>
               <div class="markdown-body">
@@ -375,7 +532,7 @@
           {/each}
         </div>
       {:else}
-        <pre class="raw-body">{@html highlightJson(getBlockRawText(block))}</pre>
+        <pre class="raw-body">{@html highlightedBlockRaw}</pre>
       {/if}
     </div>
   {/if}
@@ -629,5 +786,77 @@
     border-radius: 4px;
     overflow: auto;
     font-size: 12px;
+  }
+
+  .header-actions {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+
+  .bookmark-btn {
+    background: none;
+    border: none;
+    font-size: 18px;
+    cursor: pointer;
+    color: #adb5bd;
+    line-height: 1;
+    padding: 0;
+  }
+
+  .bookmark-btn:hover {
+    color: #f59f00;
+  }
+
+  .bookmark-btn.active {
+    color: #f59f00;
+  }
+
+  .bookmark-form {
+    margin-bottom: 12px;
+    padding: 8px;
+    background: #fff9db;
+    border: 1px solid #ffe066;
+    border-radius: 6px;
+  }
+
+  .bookmark-form textarea {
+    width: 100%;
+    border: 1px solid #dee2e6;
+    border-radius: 4px;
+    padding: 6px;
+    font-size: 12px;
+    resize: vertical;
+  }
+
+  .bookmark-form-actions {
+    display: flex;
+    gap: 6px;
+    margin-top: 6px;
+  }
+
+  .bookmark-form-actions button {
+    background: #f1f3f5;
+    border: 1px solid #ced4da;
+    border-radius: 4px;
+    padding: 4px 10px;
+    cursor: pointer;
+    font-size: 12px;
+  }
+
+  .bookmark-form-actions button:first-child {
+    background: #1864ab;
+    color: #fff;
+    border-color: #1864ab;
+  }
+
+  .bookmark-comment {
+    font-size: 12px;
+    color: #5f3f00;
+    background: #fff3bf;
+    padding: 8px 10px;
+    border-radius: 4px;
+    margin-bottom: 12px;
+    border: 1px solid #ffe066;
   }
 </style>

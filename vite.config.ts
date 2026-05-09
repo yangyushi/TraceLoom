@@ -5,7 +5,7 @@ export default defineConfig(async () => ({
   plugins: [svelte()],
   clearScreen: false,
   server: {
-    port: 5173,
+    port: 3000,
     strictPort: true,
     watch: {
       ignored: ["**/src-tauri/**"],
