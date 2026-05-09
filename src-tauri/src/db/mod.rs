@@ -1,5 +1,4 @@
 pub mod commands;
-pub mod migrations;
 pub mod models;
 
 use rusqlite::Connection;
@@ -18,7 +17,15 @@ pub fn db_path(app_handle: &AppHandle) -> Result<PathBuf, String> {
 
 pub fn init_db(app_handle: &AppHandle) -> Result<Connection, String> {
     let path = db_path(app_handle)?;
-    let mut conn = Connection::open(&path).map_err(|e| e.to_string())?;
-    migrations::run_migrations(&mut conn)?;
+    let conn = Connection::open(&path).map_err(|e| e.to_string())?;
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS recent_workspaces (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            file_path TEXT NOT NULL UNIQUE,
+            name TEXT NOT NULL,
+            last_opened TEXT NOT NULL
+        );",
+    )
+    .map_err(|e| e.to_string())?;
     Ok(conn)
 }
